@@ -1,0 +1,9 @@
+.env
+data/
+*.db
+*.session
+*.session-journal
+.venv/
+__pycache__/
+scrap/
+.idea/
