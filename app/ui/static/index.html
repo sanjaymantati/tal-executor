@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tal-executor</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d25; --panel2: #1e2631; --line: #2a3441;
+    --text: #e6edf3; --muted: #8b98a8; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --blue: #58a6ff; --violet: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+           padding: 10px 20px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  .grow { flex: 1; }
+  a { color: var(--blue); }
+  main { padding: 16px 20px 40px; max-width: 1500px; margin: 0 auto; }
+  .row { display: grid; gap: 14px; margin-bottom: 14px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; display: flex; align-items: center; gap: 8px; }
+  .stat .value { font-size: 22px; font-weight: 600; }
+  .stat .label { color: var(--muted); font-size: 12px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--muted); }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); } .dot.warn { background: var(--amber); }
+  .kv { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .kv b { color: var(--text); font-weight: 500; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+           padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+  button:hover { border-color: var(--blue); } button:disabled { opacity: .5; cursor: wait; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+  .tab { padding: 8px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--blue); }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.click { cursor: pointer; } tr.click:hover td { background: var(--panel2); }
+  tr.detail td { background: var(--bg); }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: var(--panel2); border: 1px solid var(--line); white-space: nowrap; }
+  .tag.NEW_SIGNAL, .tag.COMPLETE, .tag.CLOSED, .tag.ENTRY_TRIGGERED, .tag.OK { color: var(--green); border-color: var(--green); }
+  .tag.SIGNAL_UPDATE, .tag.ENTRY_TRIGGER, .tag.ACTIVE, .tag.OPEN, .tag.FIELD_UPDATED, .tag.CAPTURED { color: var(--blue); border-color: var(--blue); }
+  .tag.PARTIAL, .tag.PENDING, .tag.PREMIUM_UPDATE, .tag.TARGET_LEVEL_TOUCHED { color: var(--amber); border-color: var(--amber); }
+  .tag.SL_HIT, .tag.FAILED, .tag.CANCELLED, .tag.EXPIRED_INCOMPLETE, .tag.EXPIRED, .tag.EOD_EXIT { color: var(--red); border-color: var(--red); }
+  .tag.RR_TARGET_HIT, .tag.TARGET_HIT, .tag.RR_TARGET { color: var(--green); border-color: var(--green); }
+  .tag.MANUAL, .tag.MANUAL_EXIT, .tag.MANUAL_STOP_REQUESTED, .tag.MANUAL_STOP { color: var(--violet); border-color: var(--violet); }
+  button { white-space: nowrap; }
+  button.danger { border-color: var(--red); color: var(--red); }
+  button.danger:hover { background: var(--red); color: #fff; }
+  .chart { width: 100%; height: 200px; display: block; }
+  .bar { height: 8px; border-radius: 4px; display: inline-block; vertical-align: middle; min-width: 2px; }
+  .bar.pos { background: var(--green); } .bar.neg { background: var(--red); }
+  .text { white-space: pre-wrap; word-break: break-word; }
+  .muted { color: var(--muted); } .pos { color: var(--green); } .neg { color: var(--red); }
+  .fields span { display: inline-block; margin: 2px 8px 0 0; font-size: 12px; color: var(--muted); }
+  .fields span b { color: var(--text); font-weight: 500; }
+  .scroll { max-height: 640px; overflow: auto; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .error { color: var(--red); font-size: 12px; }
+  .log td { padding: 4px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .log td:last-child { word-break: break-all; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tal-executor</h1>
+  <div id="channel" class="muted">channel: -</div>
+  <div class="grow"></div>
+  <div id="pipeline"><span class="dot"></span> pipeline: -</div>
+  <div id="clock" class="muted"></div>
+</header>
+
+<main>
+  <div class="row cards">
+    <div class="card" id="card-telegram"></div>
+    <div class="card" id="card-upstox"></div>
+  </div>
+
+  <div class="row stats" id="stats"></div>
+
+  <div class="tabs" id="tabs">
+    <div class="tab active" data-tab="messages">Live messages</div>
+    <div class="tab" data-tab="trades">Captured trades</div>
+    <div class="tab" data-tab="mock">Mock trading &amp; logs</div>
+    <div class="tab" data-tab="pnl">P&amp;L</div>
+  </div>
+
+  <section id="tab-messages" class="card"></section>
+  <section id="tab-trades" class="card hidden"></section>
+  <section id="tab-pnl" class="hidden"></section>
+  <section id="tab-mock" class="hidden">
+    <div class="card" id="mock-trades" style="margin-bottom:14px"></div>
+    <div class="card" id="mock-log"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// All channel text is untrusted: every value goes through textContent, never innerHTML.
+const el = (tag, attrs, ...children) => {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+};
+const clear = (node, ...children) => { node.replaceChildren(...children.flat().filter(Boolean)); };
+const api = async (path, options) => {
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+  return body;
+};
+
+const IST = "Asia/Kolkata";
+const sameDay = (a, b) => a.toLocaleDateString("en-IN", { timeZone: IST }) === b.toLocaleDateString("en-IN", { timeZone: IST });
+const fmtTime = (iso) => {
+  if (!iso) return "-";
+  const date = new Date(iso);
+  const time = date.toLocaleTimeString("en-IN", { timeZone: IST, hour12: false });
+  if (sameDay(date, new Date())) return time;
+  return date.toLocaleDateString("en-IN", { timeZone: IST, day: "2-digit", month: "short" }) + " " + time;
+};
+const fmtNum = (value, digits = 2) => (value === null || value === undefined) ? "-" : Number(value).toFixed(digits).replace(/\.00$/, "");
+const fmtMoney = (value) => (value === null || value === undefined) ? "-" : (value >= 0 ? "+" : "") + Number(value).toFixed(2);
+const signClass = (value) => value > 0 ? "pos" : value < 0 ? "neg" : "";
+const tag = (text) => el("span", { class: `tag ${text}` }, text);
+const ago = (iso) => {
+  if (!iso) return "never";
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+};
+const kv = (label, value) => el("div", { class: "kv" }, label + ": ", el("b", {}, value ?? "-"));
+
+let activeTab = "messages";
+const openTrades = new Set();
+
+// ---------- health cards ----------
+function renderHealthCard(node, title, data, extras) {
+  const state = data === null ? "warn" : data.ok ? "ok" : "bad";
+  clear(node,
+    el("h2", {}, el("span", { class: `dot ${state}` }), title, el("span", { class: "grow" }),
+       el("button", { onclick: extras.refresh }, "Check now")),
+    el("div", {}, data === null ? "Checking..." : data.message || ""),
+    ...(data === null ? [] : extras.lines(data)),
+    data ? kv("Checked", ago(data.checked_at)) : null);
+}
+
+async function checkTelegram() {
+  renderHealthCard(document.getElementById("card-telegram"), "Telegram", null, telegramView);
+  try { renderHealthCard(document.getElementById("card-telegram"), "Telegram", await api("/api/health/telegram"), telegramView); }
+  catch (error) { renderHealthCard(document.getElementById("card-telegram"), "Telegram", { ok: false, message: error.message }, telegramView); }
+}
+async function checkUpstox() {
+  renderHealthCard(document.getElementById("card-upstox"), "Upstox API", null, upstoxView);
+  try { renderHealthCard(document.getElementById("card-upstox"), "Upstox API", await api("/api/health/upstox"), upstoxView); }
+  catch (error) { renderHealthCard(document.getElementById("card-upstox"), "Upstox API", { ok: false, message: error.message }, upstoxView); }
+}
+const telegramView = {
+  refresh: checkTelegram,
+  lines: (d) => [
+    kv("Session file", d.session_file_exists ? d.session_file : "missing"),
+    kv("Logged in as", d.account),
+    kv("Channel", d.channel_title ? `${d.channel_title} (${d.channel_id})` : d.channel_message),
+  ],
+};
+const upstoxView = {
+  refresh: checkUpstox,
+  lines: (d) => [
+    kv("NIFTY 50 LTP (test call)", d.nifty_ltp),
+    kv("Token expires", d.token_expires_at ? `${fmtTime(d.token_expires_at)} IST (${d.token_minutes_left} min left)` : "unknown"),
+  ],
+};
+
+// ---------- header + stats ----------
+async function refreshHeader() {
+  const [pipeline, summary] = await Promise.all([api("/api/pipeline"), api("/api/summary")]);
+  const name = pipeline.channel_title || pipeline.channel_reference;
+  clear(document.getElementById("channel"), "channel: ", el("b", {}, name || "-"));
+  const state = pipeline.running ? (pipeline.telegram_state === "listening" ? "ok" : "warn") : "bad";
+  const text = pipeline.running ? `pipeline running, telegram ${pipeline.telegram_state || "?"}` : "pipeline not running";
+  clear(document.getElementById("pipeline"), el("span", { class: `dot ${state}` }), " " + text);
+  renderStats(summary);
+}
+function renderStats(s) {
+  const stat = (label, value, cls) => el("div", { class: "card stat" }, el("div", { class: `value ${cls || ""}` }, value), el("div", { class: "label" }, label));
+  clear(document.getElementById("stats"),
+    stat("Messages captured", s.messages_captured),
+    stat("Waiting for parsing", s.messages_waiting_for_parsing, s.messages_waiting_for_parsing ? "" : "muted"),
+    stat("Last message", ago(s.last_message_sent_at)),
+    stat("Trades captured", s.trades_captured),
+    stat("Incomplete (expired)", s.incomplete_trades),
+    stat("Paper closed / cancelled", `${s.paper_trades_closed} / ${s.paper_trades_cancelled}`),
+    stat("Win rate", s.win_rate === null ? "-" : (s.win_rate * 100).toFixed(0) + "%"),
+    stat("Total P&L", fmtMoney(s.total_pnl), signClass(s.total_pnl)),
+    stat("Avg R", s.average_r_multiple === null ? "-" : fmtNum(s.average_r_multiple)));
+}
+
+// ---------- live messages ----------
+const fieldList = (fields) => el("div", { class: "fields" },
+  Object.entries(fields).map(([key, value]) => el("span", {}, key + ": ", el("b", {}, Array.isArray(value) ? value.join(" / ") : value))));
+async function refreshMessages() {
+  const messages = await api("/api/messages?limit=100");
+  const rows = messages.map((m) => {
+    const parsed = m.parsed;
+    return el("tr", {},
+      el("td", { class: "muted" }, fmtTime(m.sent_at), m.edited_at ? el("div", {}, "edited") : null),
+      el("td", {}, el("div", { class: "text" }, m.text || "(no text)"),
+         m.reply_to_msg_id ? el("div", { class: "muted" }, `reply to #${m.reply_to_msg_id}`) : null),
+      el("td", {}, parsed === null ? el("span", { class: "muted" }, "waiting for parser...")
+        : parsed.status === "FAILED" ? tag("FAILED")
+        : [tag(parsed.message_type), " ", el("span", { class: "muted" }, fmtNum(parsed.confidence)),
+           fieldList(parsed.fields)]),
+      el("td", {}, m.trade_id ? [el("a", { href: "#", onclick: (e) => { e.preventDefault(); showTrade(m.trade_id); } }, `trade #${m.trade_id}`),
+                                  el("div", { class: "muted" }, m.trade_role)] : "-"));
+  });
+  clear(document.getElementById("tab-messages"),
+    messages.length === 0 ? el("div", { class: "empty" }, "No messages captured yet. Start the pipeline: python -m app.main run")
+    : el("div", { class: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ...["Sent (IST)", "Message", "Parsed by LLM", "Trade"].map((t) => el("th", {}, t)))),
+        el("tbody", {}, rows))));
+}
+
+// ---------- trades ----------
+const entryText = (t) => t.entry_low === null ? "-" : t.entry_low === t.entry_high ? fmtNum(t.entry_low) : `${fmtNum(t.entry_low)}-${fmtNum(t.entry_high)}`;
+function tradeRow(t, onToggle) {
+  return el("tr", { class: "click", onclick: onToggle },
+    el("td", {}, `#${t.id}`),
+    el("td", {}, t.label.replace(/^#\d+ ?/, "") || "-"),
+    el("td", {}, tag(t.state)),
+    el("td", {}, entryText(t)),
+    el("td", {}, fmtNum(t.stop_loss)),
+    el("td", {}, t.targets.length ? t.targets.join(" / ") : "-"),
+    el("td", { class: "muted" }, t.message_count),
+    el("td", { class: "muted" }, fmtTime(t.created_at)));
+}
+async function refreshTrades() {
+  const trades = await api("/api/trades?limit=100");
+  const body = el("tbody", {});
+  for (const t of trades) {
+    body.append(tradeRow(t, () => toggleTrade(t.id)));
+    if (openTrades.has(t.id)) body.append(await detailRow(t.id, 8));
+  }
+  clear(document.getElementById("tab-trades"),
+    trades.length === 0 ? el("div", { class: "empty" }, "No trades captured yet.")
+    : el("div", { class: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ...["ID", "Contract", "State", "Entry", "SL", "Targets", "Msgs", "Created"].map((t) => el("th", {}, t)))),
+        body)));
+}
+async function detailRow(tradeId, columns) {
+  const d = await api(`/api/trades/${tradeId}`);
+  const section = (title, rows) => el("div", { style: "margin-bottom:10px" }, el("div", { class: "muted" }, title), ...rows);
+  const stop = stopControl(d);
+  return el("tr", { class: "detail" }, el("td", { colspan: columns },
+    stop ? section("Paper trade", [el("div", {}, `status ${d.paper_trade.status}  `, stop)]) : null,
+    section("Source messages", d.messages.map((m) => el("div", { class: "text" }, `${fmtTime(m.sent_at)}  `, tag(m.role), `  #${m.tg_message_id}  ${m.text}`))),
+    section("Field changes", d.field_history.length ? d.field_history.map((h) => el("div", {}, `${fmtTime(h.changed_at)}  ${h.field}: ${h.old_value} -> ${h.new_value}`)) : [el("div", { class: "muted" }, "none")]),
+    section("Events", d.events.length ? d.events.map(eventLine) : [el("div", { class: "muted" }, "none")])));
+}
+// ---------- manual stop ----------
+let actionMessage = "";
+async function stopTrade(trade, button) {
+  const closing = trade.paper_trade.status === "OPEN";
+  const question = closing ? `Close ${trade.label} now at the latest price?` : `Cancel ${trade.label}? It has not entered yet.`;
+  if (!window.confirm(question)) return;
+  button.disabled = true;
+  try { actionMessage = (await api(`/api/trades/${trade.id}/stop`, { method: "POST" })).message; }
+  catch (error) { actionMessage = "Stop failed: " + error.message; }
+  refreshActive();
+}
+function stopControl(trade) {
+  const paper = trade.paper_trade;
+  if (!paper || !paper.stoppable) return null;
+  if (paper.stop_requested) return el("span", { class: "muted" }, "stop requested...");
+  const button = el("button", { class: "danger", title: "Manually stop this paper trade" }, paper.status === "OPEN" ? "Stop & exit" : "Cancel entry");
+  button.addEventListener("click", (event) => { event.stopPropagation(); stopTrade(trade, button); });
+  return button;
+}
+
+const eventLine = (e) => el("div", {}, `${fmtTime(e.event_time)}  `, tag(e.event_type), e.price !== null ? `  @ ${fmtNum(e.price)}` : "", e.payload ? "  " + JSON.stringify(e.payload) : "");
+function toggleTrade(id) { openTrades.has(id) ? openTrades.delete(id) : openTrades.add(id); refreshActive(); }
+function showTrade(id) { openTrades.add(id); selectTab("trades"); }
+
+// ---------- mock trading ----------
+async function refreshMock() {
+  const [trades, events] = await Promise.all([api("/api/trades?limit=100"), api("/api/events?limit=200")]);
+  renderMockTrades(trades);
+  renderLog(events);
+}
+let replayMessage = "";
+async function runReplay(path, button) {
+  button.disabled = true; replayMessage = "Replaying over historical candles...";
+  refreshActive();
+  try {
+    const result = await api(path, { method: "POST" });
+    replayMessage = `Replay finished (${JSON.stringify(result.replayed)}).`;
+  } catch (error) { replayMessage = "Replay error: " + error.message; }
+  button.disabled = false;
+  refreshActive(); refreshHeader();
+}
+function renderMockTrades(trades) {
+  const waiting = trades.filter((t) => t.state === "COMPLETE" && !t.paper_trade);
+  const withPaper = trades.filter((t) => t.paper_trade);
+  const rows = withPaper.map((t) => {
+    const p = t.paper_trade;
+    return el("tr", {},
+      el("td", {}, `#${t.id}`), el("td", {}, t.label.replace(/^#\d+ ?/, "")), el("td", {}, tag(p.status)),
+      el("td", {}, p.qty ?? "-"), el("td", {}, fmtNum(p.entry_price)), el("td", {}, fmtNum(p.exit_price)),
+      el("td", {}, p.exit_reason ? tag(p.exit_reason) : "-"),
+      el("td", { class: signClass(p.pnl) }, fmtMoney(p.pnl)),
+      el("td", { class: signClass(p.r_multiple) }, p.r_multiple === null ? "-" : fmtNum(p.r_multiple) + "R"),
+      el("td", { class: "muted" }, fmtTime(p.entry_time)), el("td", { class: "muted" }, fmtTime(p.exit_time)),
+      el("td", {}, stopControl(t)));
+  });
+  const replayAll = el("button", { class: "primary" }, `Replay ${waiting.length} waiting trade(s)`);
+  replayAll.addEventListener("click", () => runReplay("/api/replay", replayAll));
+  replayAll.disabled = waiting.length === 0;
+  const waitingList = waiting.map((t) => {
+    const button = el("button", {}, "Replay");
+    button.addEventListener("click", () => runReplay(`/api/trades/${t.id}/replay`, button));
+    return el("tr", {}, el("td", {}, `#${t.id}`), el("td", {}, t.label.replace(/^#\d+ ?/, "")),
+      el("td", {}, entryText(t)), el("td", {}, fmtNum(t.stop_loss)), el("td", {}, t.targets.join(" / ")), el("td", {}, button));
+  });
+  clear(document.getElementById("mock-trades"),
+    el("div", { class: "toolbar" }, el("b", {}, "Paper (mock) trades"), el("span", { class: "grow" }),
+       el("span", { class: "muted" }, "Live trades are simulated by the running pipeline; replay simulates a stored trade over today's 1-minute candles."),
+       replayAll),
+    replayMessage ? el("div", { class: "muted", style: "margin-bottom:8px" }, replayMessage) : null,
+    actionMessage ? el("div", { class: "muted", style: "margin-bottom:8px" }, actionMessage) : null,
+    waiting.length ? el("table", {}, el("thead", {}, el("tr", {}, ...["ID", "Contract", "Entry", "SL", "Targets", ""].map((t) => el("th", {}, t)))), el("tbody", {}, waitingList)) : null,
+    withPaper.length === 0 ? el("div", { class: "empty" }, "No paper trades yet. They start automatically when a trade becomes COMPLETE and the pipeline is running.")
+      : el("table", { style: waiting.length ? "margin-top:14px" : "" },
+          el("thead", {}, el("tr", {}, ...["ID", "Contract", "Status", "Qty", "Entry", "Exit", "Reason", "P&L", "R", "Entered", "Exited", ""].map((t) => el("th", {}, t)))),
+          el("tbody", {}, rows)));
+}
+function renderLog(events) {
+  clear(document.getElementById("mock-log"),
+    el("div", { class: "toolbar" }, el("b", {}, "Transaction log (audit trail, newest first)")),
+    events.length === 0 ? el("div", { class: "empty" }, "No events yet.")
+      : el("div", { class: "scroll" }, el("table", { class: "log" },
+          el("tbody", {}, events.map((e) => el("tr", {},
+            el("td", { class: "muted" }, fmtTime(e.event_time)), el("td", {}, e.trade), el("td", {}, tag(e.event_type)),
+            el("td", {}, e.price === null ? "" : fmtNum(e.price)),
+            el("td", { class: "muted" }, e.payload ? JSON.stringify(e.payload) : "")))))));
+}
+
+// ---------- P&L ----------
+async function refreshPnl() {
+  renderPnl(await api("/api/pnl"));
+}
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svg = (tagName, attrs) => {
+  const node = document.createElementNS(SVG_NS, tagName);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+};
+function equityChart(curve) {
+  const width = 800, height = 200, pad = 28;
+  const values = [0, ...curve.map((p) => p.cumulative_pnl)];
+  const low = Math.min(...values), high = Math.max(...values);
+  const span = high - low || 1;
+  const x = (index) => pad + (index / Math.max(values.length - 1, 1)) * (width - 2 * pad);
+  const y = (value) => height - pad - ((value - low) / span) * (height - 2 * pad);
+  const chart = svg("svg", { class: "chart", viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: "none" });
+  chart.append(svg("line", { x1: pad, x2: width - pad, y1: y(0), y2: y(0), stroke: "#2a3441", "stroke-dasharray": "4" }));
+  const last = values[values.length - 1];
+  chart.append(svg("polyline", {
+    points: values.map((value, index) => `${x(index)},${y(value)}`).join(" "),
+    fill: "none", stroke: last >= 0 ? "#3fb950" : "#f85149", "stroke-width": 2, "vector-effect": "non-scaling-stroke" }));
+  return chart;
+}
+function renderPnl(data) {
+  const s = data.summary;
+  const stat = (label, value, cls) => el("div", { class: "card stat" }, el("div", { class: `value ${cls || ""}` }, value), el("div", { class: "label" }, label));
+  const money = (value) => value === null ? "-" : fmtMoney(value);
+  const maxDaily = Math.max(1, ...data.daily.map((d) => Math.abs(d.pnl)));
+  const dailyRows = [...data.daily].reverse().map((d) => el("tr", {},
+    el("td", {}, d.date), el("td", { class: "muted" }, d.trades), el("td", { class: signClass(d.pnl) }, fmtMoney(d.pnl)),
+    el("td", {}, el("span", { class: `bar ${d.pnl >= 0 ? "pos" : "neg"}`, style: `width:${Math.round(Math.abs(d.pnl) / maxDaily * 100)}%` }))));
+  const tradeRows = data.trades.map((t) => el("tr", {},
+    el("td", {}, `#${t.trade_id}`), el("td", {}, t.label.replace(/^#\d+ ?/, "")), el("td", {}, t.qty),
+    el("td", {}, fmtNum(t.entry_price)), el("td", {}, fmtNum(t.exit_price)), el("td", {}, tag(t.exit_reason)),
+    el("td", { class: signClass(t.pnl) }, fmtMoney(t.pnl)),
+    el("td", { class: signClass(t.r_multiple) }, fmtNum(t.r_multiple) + "R"),
+    el("td", { class: "muted" }, fmtNum(t.fees)),
+    el("td", { class: "muted" }, fmtTime(t.entry_time)), el("td", { class: "muted" }, fmtTime(t.exit_time))));
+  clear(document.getElementById("tab-pnl"),
+    el("div", { class: "row stats" },
+      stat("Net P&L (after fees)", money(s.net_pnl), signClass(s.net_pnl)),
+      stat("Gross P&L", money(s.gross_pnl), signClass(s.gross_pnl)),
+      stat("Fees", fmtNum(s.fees)),
+      stat("Closed trades", s.closed_trades),
+      stat("Wins / losses", `${s.wins} / ${s.losses}`),
+      stat("Win rate", s.win_rate === null ? "-" : (s.win_rate * 100).toFixed(0) + "%"),
+      stat("Avg win", money(s.average_win), "pos"), stat("Avg loss", money(s.average_loss), "neg"),
+      stat("Best / worst", `${money(s.best_trade)} / ${money(s.worst_trade)}`),
+      stat("Avg R", s.average_r_multiple === null ? "-" : fmtNum(s.average_r_multiple)),
+      stat("Profit factor", s.profit_factor === null ? "-" : fmtNum(s.profit_factor)),
+      stat("Open positions", data.open_positions)),
+    el("div", { class: "card", style: "margin-bottom:14px" },
+      el("div", { class: "toolbar" }, el("b", {}, "Cumulative P&L (closed paper trades, in exit order)")),
+      data.equity_curve.length === 0 ? el("div", { class: "empty" }, "No closed paper trades yet.") : equityChart(data.equity_curve)),
+    el("div", { class: "card", style: "margin-bottom:14px" },
+      el("div", { class: "toolbar" }, el("b", {}, "Daily P&L (IST)")),
+      data.daily.length === 0 ? el("div", { class: "empty" }, "No closed paper trades yet.")
+        : el("table", {}, el("thead", {}, el("tr", {}, ...["Day", "Trades", "P&L", ""].map((t) => el("th", {}, t)))), el("tbody", {}, dailyRows))),
+    el("div", { class: "card" },
+      el("div", { class: "toolbar" }, el("b", {}, "Closed trades (newest first)")),
+      data.trades.length === 0 ? el("div", { class: "empty" }, "Nothing closed yet.")
+        : el("div", { class: "scroll" }, el("table", {},
+            el("thead", {}, el("tr", {}, ...["ID", "Contract", "Qty", "Entry", "Exit", "Reason", "P&L", "R", "Fees", "Entered", "Exited"].map((t) => el("th", {}, t)))),
+            el("tbody", {}, tradeRows)))));
+}
+
+// ---------- tabs + loop ----------
+function selectTab(name) {
+  activeTab = name;
+  for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.tab === name);
+  for (const section of ["messages", "trades", "mock", "pnl"]) {
+    document.getElementById(`tab-${section}`).classList.toggle("hidden", name !== section);
+  }
+  refreshActive();
+}
+async function refreshActive() {
+  try {
+    if (activeTab === "messages") await refreshMessages();
+    else if (activeTab === "trades") await refreshTrades();
+    else if (activeTab === "pnl") await refreshPnl();
+    else await refreshMock();
+  } catch (error) { console.error(error); }
+}
+document.getElementById("tabs").addEventListener("click", (e) => { if (e.target.dataset.tab) selectTab(e.target.dataset.tab); });
+
+setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleTimeString("en-IN", { timeZone: IST, hour12: false }) + " IST"; }, 1000);
+setInterval(() => { refreshHeader().catch(console.error); refreshActive(); }, 2000);
+setInterval(checkUpstox, 60000);
+refreshHeader().catch(console.error); refreshActive(); checkTelegram(); checkUpstox();
+</script>
+</body>
+</html>

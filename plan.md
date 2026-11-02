@@ -1,250 +1,229 @@
-# Plan: Live Telegram Group Message Ingestion
+# Telegram Signal Capture + Paper Trading System — Build Plan
 
-## Goal
+> Purpose: single source of truth for Cursor / Claude Code. Build exactly what is written here. Where something is marked **OPEN**, use the stated default and keep it configurable. Do not invent features outside this document.
 
-Receive new messages in a Telegram group where I am a regular member (not the owner), and persist them to PostgreSQL in near real time using my own Telegram account.
+## 1. Goal
 
-## Approach
+1. Read messages from ONE Telegram channel (trading signals) in real time.
+2. Store every message raw, exactly once.
+3. Use an LLM (OpenAI) to classify each message and extract signal fields.
+4. Assemble partial messages (security/target in one, SL in another, entry in a third) into one **trade** record.
+5. Paper-trade each captured trade against Upstox market data (no real orders), with a full audit log.
+6. Broker layer must be swappable (Upstox now, Zerodha later).
 
-- Use **Telethon** (Telegram client API), authenticated as my Telegram user account.
-- Use **PostgreSQL** for persistence.
-- Run a long-lived Python process that listens for new messages.
-- Filter events to the target group once its chat ID is known.
+**Phase 1:** capture + assemble + store trades (no trading).
+**Phase 2:** paper-trade simulation + transaction log.
+**Out of scope:** real order placement, UI, multi-channel support.
 
-> This approach uses my user account rather than a BotFather bot. Only collect messages I am authorized to access, and follow Telegram's terms and the group's privacy expectations.
+## 2. Tech Stack
 
-## Prerequisites
+- Python 3.11+
+- Telethon (Telegram user-account client, uses api_id / api_hash)
+- OpenAI API (structured JSON output, model configurable via env)
+- PostgreSQL (SQLite allowed for dev) via SQLAlchemy 2.x + Alembic
+- Upstox API v2 (historical + live market data) behind a broker interface
+- asyncio throughout; Pydantic for all schemas; structlog for logging
+- Config via `.env` + `pydantic-settings`
 
-- Python 3.10+ recommended.
-- PostgreSQL database available locally or remotely.
-- Telegram API credentials from https://my.telegram.org:
-  - `api_id`
-  - `api_hash`
-- Phone number associated with my Telegram account.
-- Access to the target group through my Telegram account.
+## 3. Architecture (pipeline)
 
-## Implementation Steps
-
-### 1. Create the project
-
-```bash
-mkdir telegram-live
-cd telegram-live
-python -m venv .venv
-
-# macOS/Linux
-source .venv/bin/activate
-
-# Windows PowerShell
-# .venv\\Scripts\\Activate.ps1
-
-pip install telethon asyncpg python-dotenv
+```
+Telegram channel
+   │  (Telethon event handler: NewMessage + MessageEdited)
+   ▼
+[1] Ingestor ──► raw_messages (idempotent)
+   ▼
+[2] Classifier (LLM) ──► message_classifications
+   ▼
+[3] Trade Assembler ──► trades + trade_messages (links)
+   ▼
+[4] Trade Executor (paper) ──► paper_trades + trade_events
+   ▲
+[5] Price Feed (Upstox live/historical, behind BrokerClient interface)
 ```
 
-Create these files:
+Each stage reads from DB and writes to DB. Stages are decoupled so any one can be re-run on stored data (replay).
 
-```text
-telegram-live/
-├── main.py
-├── .env
-├── .gitignore
-└── requirements.txt
+## 4. Components
+
+### 4.1 Ingestor
+- Telethon client, session file persisted. Subscribes to the configured channel only.
+- Handle `NewMessage` and `MessageEdited`.
+- On startup: **backfill** — fetch messages since last stored `tg_message_id` to cover downtime.
+- Store per message: `channel_id`, `tg_message_id`, `reply_to_msg_id`, `text`, `sent_at` (UTC), `edited_at`, `raw_json`.
+- Idempotency: UNIQUE(`channel_id`, `tg_message_id`). Insert-or-ignore. On edit: update text, set `edited_at`, mark classification stale for re-run.
+- Capture reply/quote reference (`reply_to_msg_id`) — critical for linking premium updates and follow-up messages to the original trade.
+- Reconnect on disconnect with backoff. Never crash the process on a single bad message.
+
+### 4.2 Classifier (LLM)
+Input: the message text + the replied-to message text (if any) + last N (default 10) messages of context.
+Output (strict JSON, validated by Pydantic):
+
+```json
+{
+  "message_type": "NEW_SIGNAL | SIGNAL_UPDATE | ENTRY_TRIGGER | PREMIUM_UPDATE | TARGET_HIT | SL_HIT | EXIT | NOISE",
+  "confidence": 0.0,
+  "fields": {
+    "underlying": "string|null",
+    "expiry": "string|null",
+    "strike": "number|null",
+    "option_type": "CE|PE|null",
+    "entry_low": "number|null",
+    "entry_high": "number|null",
+    "stop_loss": "number|null",
+    "targets": ["number"],
+    "current_premium": "number|null"
+  },
+  "references_msg_id": "int|null"
+}
 ```
 
-### 2. Add dependencies
+Rules:
+- `targets` is an ordered list of levels (T1, T2, T3...), never a single value.
+- `entry_low`/`entry_high` form a range (e.g. 140–145). Single entry → both equal.
+- Absent fields = `null`. The LLM must never guess or fabricate.
+- Store prompt version, model name, raw response, tokens, latency per call.
+- Classify messages in arrival order; one retry on invalid JSON; then mark `FAILED` and continue.
+- **Phase 1 priority:** only `NEW_SIGNAL`, `SIGNAL_UPDATE`, `ENTRY_TRIGGER` must be accurate. `PREMIUM_UPDATE` etc. are stored but may be ignored downstream.
 
-`requirements.txt`:
+### 4.3 Trade Assembler
+Problem: one trade can arrive across several messages.
 
-```text
-telethon
-asyncpg
-python-dotenv
-```
+Algorithm:
+1. `NEW_SIGNAL` → create a trade in state `PARTIAL` (or `COMPLETE` if all required fields present).
+2. `SIGNAL_UPDATE` / `ENTRY_TRIGGER` → attach to a trade by, in priority order:
+   a. `reply_to_msg_id` pointing to a message already linked to a trade;
+   b. LLM-provided `references_msg_id`;
+   c. otherwise the most recent `PARTIAL` trade within the time window (default 30 min, configurable).
+3. Merge fields: only fill nulls, or overwrite on explicit update; record every change in `trade_field_history`.
+4. A trade is `COMPLETE` when it has: underlying, strike, option_type, entry range, stop_loss, ≥1 target.
+5. A `PARTIAL` trade older than the window with missing fields → `EXPIRED_INCOMPLETE` (kept for review, never traded).
+6. Every message→trade link is stored in `trade_messages`.
+7. Duplicate protection: same underlying+strike+type+expiry+entry within the window → same trade, not a new one.
 
-Install them with:
+Trade states: `PARTIAL → COMPLETE → ACTIVE → CLOSED` or `EXPIRED_INCOMPLETE` / `CANCELLED`.
 
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configure environment variables
-
-`.env`:
-
-```dotenv
-TG_API_ID=123456
-TG_API_HASH=replace_with_your_api_hash
-TG_PHONE=+91XXXXXXXXXX
-DATABASE_URL=postgresql://postgres:replace_me@localhost:5432/telegram_db
-TARGET_CHAT_ID=
-```
-
-Replace all example values. Do not commit `.env`, API credentials, or the Telethon session file to source control.
-
-`.gitignore`:
-
-```gitignore
-.env
-*.session
-*.session-journal
-.venv/
-__pycache__/
-```
-
-Create the PostgreSQL database if it does not exist:
-
-```sql
-CREATE DATABASE telegram_db;
-```
-
-### 4. Implement the listener
-
-`main.py`:
-
+### 4.4 Broker Abstraction
 ```python
-import asyncio
-import os
-import logging
+class BrokerClient(Protocol):
+    async def resolve_instrument(underlying, expiry, strike, option_type) -> Instrument
+    async def get_ltp(instrument_key) -> float
+    async def get_historical_candles(instrument_key, interval, start, end) -> list[Candle]
+    async def stream_ltp(instrument_keys, callback) -> None
+```
+- Implement `UpstoxBroker` now. Zerodha later = new class, no changes elsewhere.
+- Instrument master (Upstox instruments file) downloaded daily and cached; used to map (underlying, expiry, strike, CE/PE) → instrument key.
+- Handle Upstox token expiry (daily token): refresh flow isolated in the broker class. **OPEN:** how token is obtained daily — default: read from env/file, fail loudly if expired.
 
-import asyncpg
-from dotenv import load_dotenv
-from telethon import TelegramClient, events
+### 4.5 Paper Trade Executor
+Runs for every trade reaching `COMPLETE`.
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+**Entry**
+- Subscribe to live premium of the option.
+- Enter (simulated) when premium is within `[entry_low, entry_high]`. Fill price = LTP at trigger time.
+- If SL is hit before entry, or entry not triggered within `ENTRY_TIMEOUT` (default 60 min) or by market close → `CANCELLED`.
+- Quantity = `lot_size × LOTS` (both from config; lot size per underlying in config).
 
-API_ID = int(os.environ["TG_API_ID"])
-API_HASH = os.environ["TG_API_HASH"]
-PHONE = os.environ["TG_PHONE"]
-DATABASE_URL = os.environ["DATABASE_URL"]
+**Exit (checked on every tick)** — first condition wins:
+1. `LTP <= stop_loss` → exit at SL, reason `SL_HIT`.
+2. Target by R-multiple: risk = `entry_price − stop_loss`; `rr_target = entry_price + 2 × risk` (RR = 2:1, configurable `RR_REWARD=2`, `RR_RISK=1`) → exit, reason `RR_TARGET`.
+3. Market close (configurable, default 15:15 IST) → exit at LTP, reason `EOD`.
+- Also record which of the channel's target levels (T1, T2, T3) were touched, with timestamps, as informational events (`TARGET_LEVEL_TOUCHED`), independent of exit logic.
+- **OPEN:** exit policy. Default = 2R fixed exit as above. Alternative modes to keep as config options: `SIGNAL_TARGETS` (exit at T1/T2/T3 per signal), `HYBRID`. Implement only `RR` first; leave a strategy interface for the others.
 
-# Leave TARGET_CHAT_ID empty during initial discovery.
-target_chat_id_raw = os.getenv("TARGET_CHAT_ID", "").strip()
-TARGET_CHAT_ID = int(target_chat_id_raw) if target_chat_id_raw else None
+**Fees/slippage:** configurable flat slippage (default 0) and brokerage per order (default 0).
 
-client = TelegramClient("telegram_session", API_ID, API_HASH)
+**P&L:** `(exit − entry) × qty − fees`. Also store R-multiple achieved.
 
+**Replay mode:** same executor can run over historical candles (Upstox historical API) for a stored trade to verify logic without waiting for live market. Candle resolution: 1-minute; within a candle, assume SL is checked before target when both are touched (conservative). Document this assumption in code.
 
-async def main():
-    db = await asyncpg.connect(DATABASE_URL)
+### 4.6 Audit Trail (mandatory)
+Every state change is an immutable row in `trade_events`:
+`trade_id`, `event_type` (CAPTURED, FIELD_UPDATED, COMPLETE, ENTRY_TRIGGERED, TARGET_LEVEL_TOUCHED, SL_HIT, RR_TARGET_HIT, EOD_EXIT, CANCELLED, EXPIRED), `price`, `event_time`, `source_message_id`, `payload_json`.
 
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS group_messages (
-            chat_id BIGINT NOT NULL,
-            message_id BIGINT NOT NULL,
-            sender_id BIGINT,
-            message_text TEXT,
-            message_date TIMESTAMPTZ,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (chat_id, message_id)
-        )
-    """)
+Timestamps required: message sent time, captured time, classified time, trade-complete time, entry time, exit time. All UTC in DB, IST for display.
 
-    @client.on(events.NewMessage)
-    async def on_new_message(event):
-        if not event.is_group:
-            return
+## 5. Database Schema
 
-        if TARGET_CHAT_ID is not None and event.chat_id != TARGET_CHAT_ID:
-            return
+- `raw_messages`(id, channel_id, tg_message_id, reply_to_msg_id, text, sent_at, edited_at, raw_json, created_at) — UNIQUE(channel_id, tg_message_id)
+- `message_classifications`(id, message_id FK, message_type, confidence, fields_json, references_msg_id, model, prompt_version, raw_response, tokens, latency_ms, status, created_at)
+- `trades`(id, underlying, expiry, strike, option_type, instrument_key, entry_low, entry_high, stop_loss, targets_json, state, first_message_id, created_at, completed_at, updated_at)
+- `trade_messages`(trade_id, message_id, role) — role: ORIGIN / UPDATE / TRIGGER / PREMIUM
+- `trade_field_history`(id, trade_id, field, old_value, new_value, message_id, changed_at)
+- `paper_trades`(id, trade_id FK, entry_price, entry_time, qty, exit_price, exit_time, exit_reason, pnl, r_multiple, fees, status)
+- `trade_events`(see 4.6)
+- `config_snapshots`(id, trade_id, json) — config used per paper trade, for reproducibility
 
-        message = event.message
-        text = message.message or ""
+## 6. Configuration (`.env`)
 
-        try:
-            await db.execute(
-                """
-                INSERT INTO group_messages (
-                    chat_id, message_id, sender_id,
-                    message_text, message_date
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (chat_id, message_id) DO NOTHING
-                """,
-                event.chat_id,
-                message.id,
-                message.sender_id,
-                text,
-                message.date,
-            )
-            logger.info(
-                "Stored group message: chat_id=%s message_id=%s",
-                event.chat_id,
-                message.id,
-            )
-        except Exception:
-            logger.exception("Failed to store message")
-
-    try:
-        await client.start(phone=PHONE)
-        logger.info("Listening for new group messages")
-        await client.run_until_disconnected()
-    finally:
-        await client.disconnect()
-        await db.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```
+TG_API_ID, TG_API_HASH, TG_SESSION_NAME, TG_CHANNEL
+OPENAI_API_KEY, OPENAI_MODEL
+UPSTOX_API_KEY, UPSTOX_API_SECRET, UPSTOX_ACCESS_TOKEN
+DATABASE_URL
+BROKER=upstox
+LOTS=1
+LOT_SIZE_MAP={"NIFTY":75,"BANKNIFTY":30}   # verify current exchange lot sizes before use
+RR_REWARD=2
+RR_RISK=1
+EXIT_MODE=RR
+ASSEMBLY_WINDOW_MIN=30
+ENTRY_TIMEOUT_MIN=60
+MARKET_CLOSE_EXIT=15:15
+SLIPPAGE=0
+BROKERAGE_PER_ORDER=0
 ```
 
-### 5. Authenticate and run
+## 7. Project Structure
 
-```bash
-python main.py
+```
+app/
+  config.py
+  db/            models.py, session.py, migrations/
+  telegram/      ingestor.py, backfill.py
+  llm/           classifier.py, prompts.py, schemas.py
+  assembler/     assembler.py, matching.py
+  broker/        base.py, upstox.py, instruments.py   (zerodha.py later)
+  execution/     executor.py, exit_strategies.py, replay.py
+  audit/         events.py
+  main.py        (wires ingestor + classifier + assembler + executor as async tasks)
+tests/
+  fixtures/      sample_messages.json   (real channel samples, anonymized)
+  test_classifier.py, test_assembler.py, test_executor.py
 ```
 
-On first run, Telethon will ask for the login code sent by Telegram and may ask for the two-step verification password. This creates `telegram_session.session`, which allows later runs to reuse the login.
+## 8. Build Order (milestones)
 
-Keep the session file private. Anyone who obtains it may be able to access the Telegram account.
+1. **M1 — Ingest:** Telethon listener + backfill + `raw_messages`. Verify no duplicates after restart.
+2. **M2 — Classify:** LLM classifier + fixtures from real messages. Measure accuracy on a hand-labelled set (≥50 messages). Do not proceed until `NEW_SIGNAL` precision is acceptable.
+3. **M3 — Assemble:** multi-message trade assembly using reply links + window. Tests for the split-message case (target+name → SL → entry).
+4. **M4 — Broker:** Upstox instrument resolution + LTP + historical candles behind `BrokerClient`.
+5. **M5 — Replay executor:** run stored trades over historical candles; produce paper_trades + events.
+6. **M6 — Live executor:** stream LTP, paper-trade in real time.
+7. **M7 — Report:** simple CLI/SQL report: trades captured, win rate, total P&L, avg R, incomplete-trade count.
 
-### 6. Identify the target group
+## 9. Testing Requirements
 
-Initially, leave `TARGET_CHAT_ID` blank. While the listener runs, add temporary logging inside the handler:
+- Unit tests for assembler using real split-message sequences.
+- Classifier tests with a labelled fixture set; LLM calls mocked in CI, real calls in a manual eval script.
+- Executor tests: SL-first, target-first, both in same candle, EOD, entry never triggered.
+- Idempotency test: replaying the same messages creates no duplicates.
 
-```python
-chat = await event.get_chat()
-logger.info("Group: %s | chat_id: %s", getattr(chat, "title", None), event.chat_id)
-```
+## 10. Non-Functional Rules
 
-Send a test message in the intended group and note its ID. Stop the process, set `TARGET_CHAT_ID` in `.env`, and restart it. Remove or reduce diagnostic logging after setup.
+- No real orders, ever, in this codebase. No order-placement method on `BrokerClient` in this phase.
+- Secrets only from env. Never log tokens or full API keys.
+- Any LLM output failing validation is stored and skipped, never trusted.
+- Every stage idempotent and re-runnable from DB.
+- Single channel; use a dedicated Telegram account/session for the listener (userbot use carries account-restriction risk; keep read-only, no sending).
 
-### 7. Verify database writes
+## 11. OPEN Items (defaults applied if unanswered)
 
-```sql
-SELECT chat_id, message_id, sender_id, message_text, message_date
-FROM group_messages
-ORDER BY received_at DESC
-LIMIT 20;
-```
-
-## Validation Checklist
-
-- [ ] Telegram API credentials are valid.
-- [ ] PostgreSQL is reachable.
-- [ ] First-run login completes successfully.
-- [ ] A new message in the target group is logged and saved.
-- [ ] Messages from unrelated groups are ignored after configuring `TARGET_CHAT_ID`.
-- [ ] Duplicate message inserts do not create duplicate rows.
-- [ ] The process reconnects or is restarted after network/process failures.
-- [ ] Secrets and session files are excluded from Git.
-
-## Production Hardening
-
-1. Run the listener under a process supervisor (systemd, Docker restart policy, or similar).
-2. Add structured logs, health checks, and alerts for database or Telegram connection failures.
-3. Use bounded retries with backoff for transient database errors.
-4. Consider a connection pool (`asyncpg.create_pool`) for higher throughput.
-5. Add fields for media metadata if photos, documents, or videos must be tracked; downloading media should be a separate, explicit requirement.
-6. Define a retention policy and restrict database access.
-7. Do not assume this listener backfills old messages. Live event handlers primarily process updates received while connected; implement a separate, authorized history-sync process if needed.
-8. Review Telegram's terms and the group's rules before storing or processing other members' messages.
-
-## Scope and Limitations
-
-- This is a live listener for new group messages visible to the authenticated account.
-- It does not require group ownership or adding a bot.
-- It does not automatically download media files.
-- It does not automatically import historical messages.
-- Telegram connectivity, permissions, rate limits, and account security affect reliability.
+| # | Question | Default |
+|---|----------|---------|
+| 1 | Exit rule: pure 2R, or channel targets T1/T2/T3? | Pure 2R |
+| 2 | Instruments: Nifty/BankNifty index options only, or stock options too? | Index options |
+| 3 | Strike: always stated in signal, or inferred (ATM/OTM)? | Stated in signal |
+| 4 | Is SL given as premium price or underlying index level? | Premium price |
+| 5 | Upstox daily token acquisition (manual vs automated)? | Manual via env |
+| 6 | Max concurrent open paper trades? | Unlimited |

@@ -1,0 +1,91 @@
+from enum import StrEnum
+
+
+class MessageType(StrEnum):
+    NEW_SIGNAL = "NEW_SIGNAL"
+    SIGNAL_UPDATE = "SIGNAL_UPDATE"
+    ENTRY_TRIGGER = "ENTRY_TRIGGER"
+    PREMIUM_UPDATE = "PREMIUM_UPDATE"
+    TARGET_HIT = "TARGET_HIT"
+    SL_HIT = "SL_HIT"
+    EXIT = "EXIT"
+    NOISE = "NOISE"
+
+
+class ClassificationStatus(StrEnum):
+    OK = "OK"
+    FAILED = "FAILED"
+    STALE = "STALE"
+
+
+class OptionType(StrEnum):
+    CE = "CE"
+    PE = "PE"
+
+
+class TradeState(StrEnum):
+    PARTIAL = "PARTIAL"
+    COMPLETE = "COMPLETE"
+    ACTIVE = "ACTIVE"
+    CLOSED = "CLOSED"
+    EXPIRED_INCOMPLETE = "EXPIRED_INCOMPLETE"
+    CANCELLED = "CANCELLED"
+
+
+class TradeMessageRole(StrEnum):
+    ORIGIN = "ORIGIN"
+    UPDATE = "UPDATE"
+    TRIGGER = "TRIGGER"
+    PREMIUM = "PREMIUM"
+
+
+class EventType(StrEnum):
+    CAPTURED = "CAPTURED"
+    FIELD_UPDATED = "FIELD_UPDATED"
+    COMPLETE = "COMPLETE"
+    ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
+    TARGET_LEVEL_TOUCHED = "TARGET_LEVEL_TOUCHED"
+    SL_HIT = "SL_HIT"
+    RR_TARGET_HIT = "RR_TARGET_HIT"
+    EOD_EXIT = "EOD_EXIT"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+    MANUAL_STOP_REQUESTED = "MANUAL_STOP_REQUESTED"
+    MANUAL_EXIT = "MANUAL_EXIT"
+
+
+class PaperTradeStatus(StrEnum):
+    PENDING = "PENDING"
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+    CANCELLED = "CANCELLED"
+
+
+class ExitMode(StrEnum):
+    RR = "RR"
+    SIGNAL_TARGETS = "SIGNAL_TARGETS"
+    HYBRID = "HYBRID"
+
+
+class ExitReason(StrEnum):
+    SL_HIT = "SL_HIT"
+    RR_TARGET = "RR_TARGET"
+    EOD = "EOD"
+    MANUAL = "MANUAL"
+
+
+class CancelReason(StrEnum):
+    ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
+    MARKET_CLOSE = "MARKET_CLOSE"
+    SL_BEFORE_ENTRY = "SL_BEFORE_ENTRY"
+    INVALID_LEVELS = "INVALID_LEVELS"
+    INSTRUMENT_NOT_FOUND = "INSTRUMENT_NOT_FOUND"
+    UNKNOWN_LOT_SIZE = "UNKNOWN_LOT_SIZE"
+    MANUAL_STOP = "MANUAL_STOP"
+
+
+class StopRequestResult(StrEnum):
+    REQUESTED = "REQUESTED"
+    ALREADY_REQUESTED = "ALREADY_REQUESTED"
+    NOT_STOPPABLE = "NOT_STOPPABLE"
+    UNKNOWN_TRADE = "UNKNOWN_TRADE"

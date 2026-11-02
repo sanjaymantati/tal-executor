@@ -1,0 +1,94 @@
+{
+  "note": "Illustrative, anonymised samples in the style of an Indian index-options channel. Replace/extend with real labelled messages (50+) before trusting classifier accuracy.",
+  "messages": [
+    {
+      "tg_message_id": 100,
+      "reply_to_msg_id": null,
+      "minutes": 0,
+      "text": "Good morning traders. Market looks volatile today, trade with discipline.",
+      "label": {"message_type": "NOISE", "confidence": 0.98, "fields": {}, "references_msg_id": null}
+    },
+    {
+      "tg_message_id": 101,
+      "reply_to_msg_id": null,
+      "minutes": 5,
+      "text": "BANKNIFTY 52000 CE\nTARGET 250 - 300",
+      "label": {
+        "message_type": "NEW_SIGNAL",
+        "confidence": 0.93,
+        "fields": {"underlying": "BANKNIFTY", "strike": 52000, "option_type": "CE", "targets": [250, 300]},
+        "references_msg_id": null
+      }
+    },
+    {
+      "tg_message_id": 102,
+      "reply_to_msg_id": null,
+      "minutes": 7,
+      "text": "SL 180",
+      "label": {
+        "message_type": "SIGNAL_UPDATE",
+        "confidence": 0.85,
+        "fields": {"stop_loss": 180},
+        "references_msg_id": 101
+      }
+    },
+    {
+      "tg_message_id": 103,
+      "reply_to_msg_id": null,
+      "minutes": 9,
+      "text": "BUY ABOVE 200-205",
+      "label": {
+        "message_type": "ENTRY_TRIGGER",
+        "confidence": 0.9,
+        "fields": {"entry_low": 200, "entry_high": 205},
+        "references_msg_id": 101
+      }
+    },
+    {
+      "tg_message_id": 104,
+      "reply_to_msg_id": 103,
+      "minutes": 40,
+      "text": "Running 215, +10 points. Hold.",
+      "label": {
+        "message_type": "PREMIUM_UPDATE",
+        "confidence": 0.9,
+        "fields": {"current_premium": 215},
+        "references_msg_id": 103
+      }
+    },
+    {
+      "tg_message_id": 105,
+      "reply_to_msg_id": null,
+      "minutes": 120,
+      "text": "NIFTY 24500 PE BUY 120-125 SL 100 TGT 150/170/190",
+      "label": {
+        "message_type": "NEW_SIGNAL",
+        "confidence": 0.97,
+        "fields": {
+          "underlying": "NIFTY", "strike": 24500, "option_type": "PE",
+          "entry_low": 120, "entry_high": 125, "stop_loss": 100, "targets": [150, 170, 190]
+        },
+        "references_msg_id": null
+      }
+    },
+    {
+      "tg_message_id": 106,
+      "reply_to_msg_id": null,
+      "minutes": 122,
+      "text": "Join our premium group for more calls, DM now.",
+      "label": {"message_type": "NOISE", "confidence": 0.97, "fields": {}, "references_msg_id": null}
+    },
+    {
+      "tg_message_id": 107,
+      "reply_to_msg_id": 105,
+      "minutes": 150,
+      "text": "T1 done, book partial.",
+      "label": {
+        "message_type": "TARGET_HIT",
+        "confidence": 0.92,
+        "fields": {},
+        "references_msg_id": 105
+      }
+    }
+  ]
+}

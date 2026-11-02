@@ -4,6 +4,9 @@ data/
 *.session
 *.session-journal
 .venv/
+.venv-bootstrap/
+.uv-python/
 __pycache__/
+.pytest_cache/
 scrap/
 .idea/
