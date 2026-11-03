@@ -14,7 +14,7 @@ from app.enums import (
     TradeMessageRole,
     TradeState,
 )
-from app.execution.executor import PaperTradeExecutor
+from app.execution.executor import HERO_ZERO_MESSAGE, PaperTradeExecutor, is_stated_same_day_expiry
 from app.execution.ledger import PaperTradeLedger
 from app.execution.live import LiveTradeWatcher
 from app.execution.replay import TradeReplayer
@@ -48,12 +48,13 @@ class FakeBroker:
         self.ticks = ticks
         self.resolve_calls = 0
         self.fail_resolution = False
+        self.instrument = INSTRUMENT
 
     async def resolve_instrument(self, underlying, expiry, strike, option_type) -> Instrument:
         self.resolve_calls += 1
         if self.fail_resolution:
             raise InstrumentNotFoundError("nope")
-        return INSTRUMENT
+        return self.instrument
 
     async def get_ltp(self, instrument_key: str) -> float:
         return self.ticks[0]
@@ -72,7 +73,9 @@ def candle(minute: int, open: float, high: float, low: float, close: float) -> C
     return Candle(BASE_TIME + timedelta(minutes=minute), open, high, low, close, 1000)
 
 
-async def create_complete_trade(session_factory, lot_underlying: str = "BANKNIFTY") -> int:
+async def create_complete_trade(
+    session_factory, lot_underlying: str = "BANKNIFTY", expiry: str | None = None
+) -> int:
     async with session_factory.begin() as session:
         message = RawMessage(
             channel_id=CHANNEL_ID,
@@ -84,7 +87,7 @@ async def create_complete_trade(session_factory, lot_underlying: str = "BANKNIFT
         session.add(message)
         trade = Trade(
             underlying=lot_underlying,
-            expiry=None,
+            expiry=expiry,
             strike=52000,
             option_type="CE",
             entry_low=140,
@@ -218,6 +221,49 @@ async def test_unresolvable_instrument_cancels_the_paper_trade(session_factory):
     assert event.payload_json == {"reason": "INSTRUMENT_NOT_FOUND"}
 
 
+def test_stated_expiry_phrases_and_dates_mean_today():
+    today = date(2026, 11, 2)
+    assert is_stated_same_day_expiry("today", today)
+    assert is_stated_same_day_expiry("hero-zero", today)
+    assert is_stated_same_day_expiry("2026-11-02", today)
+    assert not is_stated_same_day_expiry("2026-11-26", today)
+    assert not is_stated_same_day_expiry(None, today)
+
+
+async def test_same_day_contract_is_cancelled_as_hero_zero(session_factory):
+    trade_id = await create_complete_trade(session_factory)
+    broker = FakeBroker(candles=[], ticks=[])
+    broker.instrument = Instrument(
+        "NSE_FO|1", "BANKNIFTY", "BANKNIFTY", date(2026, 11, 2), 52000, "CE", LOT_SIZE
+    )
+
+    await TradeReplayer(build_executor(session_factory, broker), broker).replay_trade(trade_id)
+
+    paper = await load_one(session_factory, PaperTrade)
+    trade = await load_one(session_factory, Trade)
+    assert paper.status == PaperTradeStatus.CANCELLED.value
+    assert paper.entry_price is None
+    assert trade.state == TradeState.CANCELLED.value
+    async with session_factory() as session:
+        event = (await session.execute(select(TradeEvent))).scalar_one()
+    assert event.payload_json == {"reason": "HERO_ZERO", "message": HERO_ZERO_MESSAGE}
+
+
+async def test_stated_expiry_today_cancels_without_resolving(session_factory):
+    trade_id = await create_complete_trade(session_factory, expiry="today")
+    broker = FakeBroker(candles=[], ticks=[])
+
+    await TradeReplayer(build_executor(session_factory, broker), broker).replay_trade(trade_id)
+
+    assert broker.resolve_calls == 0
+    paper = await load_one(session_factory, PaperTrade)
+    assert paper.status == PaperTradeStatus.CANCELLED.value
+    assert paper.entry_price is None
+    async with session_factory() as session:
+        event = (await session.execute(select(TradeEvent))).scalar_one()
+    assert event.payload_json == {"reason": "HERO_ZERO", "message": HERO_ZERO_MESSAGE}
+
+
 async def test_unknown_lot_size_cancels_the_paper_trade(session_factory):
     trade_id = await create_complete_trade(session_factory, lot_underlying="FINNIFTY")
     broker = FakeBroker(candles=[], ticks=[])
@@ -333,6 +379,55 @@ async def test_a_second_manual_stop_request_is_recognised(session_factory):
 
     assert await ledger.request_manual_stop(trade_id, utc_clock()) is StopRequestResult.REQUESTED
     assert await ledger.request_manual_stop(trade_id, utc_clock()) is StopRequestResult.ALREADY_REQUESTED
+    await watcher.stop_all()
+
+
+after_market_close_clock = lambda: BASE_TIME + timedelta(hours=5, minutes=30)  # 15:30 IST
+
+
+async def test_open_position_is_closed_at_market_close_even_without_a_new_tick(session_factory):
+    trade_id = await create_complete_trade(session_factory)
+    broker = FakeBroker(candles=[], ticks=[144, 160])
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, utc_clock)
+    await watcher.start_new_watches()
+    await wait_until(session_factory, lambda p: p.status == PaperTradeStatus.OPEN.value)
+    await asyncio.sleep(0.1)  # let the second tick through
+
+    watcher._clock = after_market_close_clock
+    assert await watcher.close_trades_at_market_close() == 1
+    await watcher.stop_all()
+
+    paper = await load_one(session_factory, PaperTrade)
+    assert paper.status == PaperTradeStatus.CLOSED.value
+    assert paper.exit_reason == "EOD"
+    assert paper.exit_price == 160
+    assert paper.pnl == (160 - 144) * 2 * LOT_SIZE
+    assert (await load_one(session_factory, Trade)).state == TradeState.CLOSED.value
+
+
+async def test_waiting_entry_is_cancelled_at_market_close(session_factory):
+    await create_complete_trade(session_factory)
+    broker = FakeBroker(candles=[], ticks=[155])  # never reaches the entry range
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, utc_clock)
+    await watcher.start_new_watches()
+
+    watcher._clock = after_market_close_clock
+    assert await watcher.close_trades_at_market_close() == 1
+    await watcher.stop_all()
+
+    paper = await load_one(session_factory, PaperTrade)
+    assert paper.status == PaperTradeStatus.CANCELLED.value
+    assert (await load_one(session_factory, Trade)).state == TradeState.CANCELLED.value
+
+
+async def test_nothing_is_closed_before_market_close(session_factory):
+    await create_complete_trade(session_factory)
+    broker = FakeBroker(candles=[], ticks=[144])
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, utc_clock)
+    await watcher.start_new_watches()
+    await wait_until(session_factory, lambda p: p.status == PaperTradeStatus.OPEN.value)
+
+    assert await watcher.close_trades_at_market_close() == 0
     await watcher.stop_all()
 
 

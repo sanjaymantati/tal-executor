@@ -14,7 +14,7 @@ from app.db.session import SessionFactory
 from app.execution.executor import PaperTradeExecutor
 from app.execution.ledger import PaperTradeLedger
 from app.llm.classifier import MessageClassifier
-from app.llm.client import OpenAiLlmClient
+from app.llm.factory import build_llm_client
 from app.llm.prompts import PROMPT_VERSION
 from app.status import PipelineStatusStore
 from app.telegram.backfill import ChannelBackfiller
@@ -44,7 +44,7 @@ def build_ingestor(
 
 
 def build_classifier(settings: Settings, session_factory: SessionFactory) -> MessageClassifier:
-    llm = OpenAiLlmClient(settings.openai_api_key, settings.openai_model)
+    llm = build_llm_client(settings)
     return MessageClassifier(
         session_factory,
         llm,

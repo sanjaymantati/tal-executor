@@ -48,9 +48,10 @@ class LiveTradeWatcher:
         self._watches: dict[int, Watch] = {}
 
     async def sync_watches(self) -> None:
-        """One scheduler cycle: follow new trades, then honour operator stop requests."""
+        """One scheduler cycle: follow new trades, honour stop requests, then close at market close."""
         await self.start_new_watches()
         await self.apply_stop_requests()
+        await self.close_trades_at_market_close()
 
     async def start_new_watches(self) -> int:
         started = await self._resume_unfinished_trades()
@@ -63,6 +64,17 @@ class LiveTradeWatcher:
             if watch.is_running and await self._executor.has_pending_stop_request(watch.trade_id):
                 stopped += await self._stop_manually(watch)
         return stopped
+
+    async def close_trades_at_market_close(self) -> int:
+        """Closes open positions and cancels waiting entries once the clock passes market close.
+
+        Needed because the price-driven close only fires when a tick arrives after market close.
+        """
+        closed = 0
+        for watch in list(self._watches.values()):
+            if watch.is_running and self._clock() >= watch.prepared.plan.market_close_at:
+                closed += await self._close_at_market_close(watch)
+        return closed
 
     async def stop_all(self) -> None:
         tasks = [watch.task for watch in self._watches.values() if watch.task is not None]
@@ -122,7 +134,7 @@ class LiveTradeWatcher:
     async def _stop_manually(self, watch: Watch) -> int:
         """Returns 1 when the trade was stopped; 0 when no price was available yet (retried next cycle)."""
         try:
-            price = await self._find_stop_price(watch)
+            price = await self._find_closing_price(watch)
         except Exception as error:
             log.warning("manual_stop_price_unavailable", trade_id=watch.trade_id, error=repr(error))
             return 0
@@ -132,7 +144,20 @@ class LiveTradeWatcher:
         log.info("manual_stop_applied", trade_id=watch.trade_id, price=price)
         return 1
 
-    async def _find_stop_price(self, watch: Watch) -> float | None:
+    async def _close_at_market_close(self, watch: Watch) -> int:
+        """Returns 1 when the trade was closed; 0 when no price was available yet (retried next cycle)."""
+        try:
+            price = await self._find_closing_price(watch)
+        except Exception as error:
+            log.warning("market_close_price_unavailable", trade_id=watch.trade_id, error=repr(error))
+            return 0
+        async with watch.lock:
+            await self._executor.finish_session(watch.prepared, price, self._clock())
+        watch.finished.set()
+        log.info("market_close_applied", trade_id=watch.trade_id, price=price)
+        return 1
+
+    async def _find_closing_price(self, watch: Watch) -> float | None:
         """A position that never entered needs no price; an open one exits at the latest known price."""
         if watch.prepared.machine.status is not PaperTradeStatus.OPEN:
             return None

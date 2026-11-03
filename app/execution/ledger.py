@@ -140,7 +140,12 @@ class PaperTradeLedger:
             )
 
     async def cancel_unstarted_trade(
-        self, trade_id: int, reason: CancelReason, time: datetime, config: ExecutionConfig
+        self,
+        trade_id: int,
+        reason: CancelReason,
+        time: datetime,
+        config: ExecutionConfig,
+        message: str | None = None,
     ) -> None:
         async with self._session_factory.begin() as session:
             trade = await session.get(Trade, trade_id)
@@ -150,7 +155,13 @@ class PaperTradeLedger:
                 ConfigSnapshot(trade_id=trade_id, config_json=config.model_dump(mode="json"))
             )
             record_trade_event(
-                session, trade_id, EventType.CANCELLED, time, None, None, {"reason": reason.value}
+                session,
+                trade_id,
+                EventType.CANCELLED,
+                time,
+                None,
+                None,
+                build_cancel_payload(reason, message),
             )
 
     async def request_manual_stop(self, trade_id: int, time: datetime) -> StopRequestResult:
@@ -225,3 +236,10 @@ class PaperTradeLedger:
             )
         )
         return result.scalar_one()
+
+
+def build_cancel_payload(reason: CancelReason, message: str | None) -> dict[str, str]:
+    payload = {"reason": reason.value}
+    if message is not None:
+        payload["message"] = message
+    return payload

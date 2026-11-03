@@ -39,8 +39,12 @@ python -m app.main replay --trade-id 12   # one trade
 python -m app.ui                          # dashboard only, to browse stored data (no listener)
 python -m app.report                      # captured trades, win rate, P&L, avg R, incomplete count
 python -m pytest                          # tests (LLM and broker are mocked)
-python -m scripts.eval_classifier PATH    # manual: real OpenAI calls vs a hand-labelled file
+python -m scripts.eval_classifier PATH    # manual: real LLM calls vs a hand-labelled file
 ```
+
+**Local Ollama (OpenAI-compatible API):** set `LLM_PROVIDER=ollama`, `OPENAI_MODEL` to your pulled
+model (e.g. `llama3.2`), and optionally `OPENAI_BASE_URL` (defaults to `http://localhost:11434/v1`).
+`OPENAI_API_KEY` can be omitted for Ollama (defaults to `ollama`).
 
 Each stage reads from and writes to the database and is idempotent, so any stage can be re-run.
 

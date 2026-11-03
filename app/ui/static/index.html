@@ -292,7 +292,12 @@ function stopControl(trade) {
   return button;
 }
 
-const eventLine = (e) => el("div", {}, `${fmtTime(e.event_time)}  `, tag(e.event_type), e.price !== null ? `  @ ${fmtNum(e.price)}` : "", e.payload ? "  " + JSON.stringify(e.payload) : "");
+function describePayload(payload) {
+  if (!payload) return "";
+  if (payload.message) return payload.message;
+  return JSON.stringify(payload);
+}
+const eventLine = (e) => el("div", {}, `${fmtTime(e.event_time)}  `, tag(e.event_type), e.price !== null ? `  @ ${fmtNum(e.price)}` : "", e.payload ? "  " + describePayload(e.payload) : "");
 function toggleTrade(id) { openTrades.has(id) ? openTrades.delete(id) : openTrades.add(id); refreshActive(); }
 function showTrade(id) { openTrades.add(id); selectTab("trades"); }
 
@@ -356,7 +361,7 @@ function renderLog(events) {
           el("tbody", {}, events.map((e) => el("tr", {},
             el("td", { class: "muted" }, fmtTime(e.event_time)), el("td", {}, e.trade), el("td", {}, tag(e.event_type)),
             el("td", {}, e.price === null ? "" : fmtNum(e.price)),
-            el("td", { class: "muted" }, e.payload ? JSON.stringify(e.payload) : "")))))));
+            el("td", { class: "muted" }, describePayload(e.payload))))))));
 }
 
 // ---------- P&L ----------
@@ -394,7 +399,8 @@ function renderPnl(data) {
     el("td", {}, el("span", { class: `bar ${d.pnl >= 0 ? "pos" : "neg"}`, style: `width:${Math.round(Math.abs(d.pnl) / maxDaily * 100)}%` }))));
   const tradeRows = data.trades.map((t) => el("tr", {},
     el("td", {}, `#${t.trade_id}`), el("td", {}, t.label.replace(/^#\d+ ?/, "")), el("td", {}, t.qty),
-    el("td", {}, fmtNum(t.entry_price)), el("td", {}, fmtNum(t.exit_price)), el("td", {}, tag(t.exit_reason)),
+    el("td", {}, fmtNum(t.entry_price)), el("td", {}, fmtNum(t.stop_loss)), el("td", { class: "muted" }, fmtMoney(t.risk_amount)),
+    el("td", {}, fmtNum(t.exit_price)), el("td", {}, tag(t.exit_reason)),
     el("td", { class: signClass(t.pnl) }, fmtMoney(t.pnl)),
     el("td", { class: signClass(t.r_multiple) }, fmtNum(t.r_multiple) + "R"),
     el("td", { class: "muted" }, fmtNum(t.fees)),
@@ -409,6 +415,8 @@ function renderPnl(data) {
       stat("Win rate", s.win_rate === null ? "-" : (s.win_rate * 100).toFixed(0) + "%"),
       stat("Avg win", money(s.average_win), "pos"), stat("Avg loss", money(s.average_loss), "neg"),
       stat("Best / worst", `${money(s.best_trade)} / ${money(s.worst_trade)}`),
+      stat("Stop-loss exits", s.stop_loss_hits), stat("Stop-loss P&L", money(s.stop_loss_pnl), signClass(s.stop_loss_pnl)),
+      stat("Total risk at SL", money(s.total_risk)),
       stat("Avg R", s.average_r_multiple === null ? "-" : fmtNum(s.average_r_multiple)),
       stat("Profit factor", s.profit_factor === null ? "-" : fmtNum(s.profit_factor)),
       stat("Open positions", data.open_positions)),
@@ -423,7 +431,7 @@ function renderPnl(data) {
       el("div", { class: "toolbar" }, el("b", {}, "Closed trades (newest first)")),
       data.trades.length === 0 ? el("div", { class: "empty" }, "Nothing closed yet.")
         : el("div", { class: "scroll" }, el("table", {},
-            el("thead", {}, el("tr", {}, ...["ID", "Contract", "Qty", "Entry", "Exit", "Reason", "P&L", "R", "Fees", "Entered", "Exited"].map((t) => el("th", {}, t)))),
+            el("thead", {}, el("tr", {}, ...["ID", "Contract", "Qty", "Entry", "SL", "Risk at SL", "Exit", "Reason", "P&L", "R", "Fees", "Entered", "Exited"].map((t) => el("th", {}, t)))),
             el("tbody", {}, tradeRows)))));
 }
 

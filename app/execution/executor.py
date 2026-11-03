@@ -1,15 +1,21 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.broker.base import BrokerClient, InstrumentNotFoundError
+from app.broker.instruments import parse_expiry_text
 from app.config import ExecutionConfig, UnknownLotSizeError
-from app.enums import PaperTradeStatus
+from app.enums import CancelReason, PaperTradeStatus
 from app.execution.exit_strategies import ExitStrategy, build_exit_strategy
 from app.execution.ledger import PaperTradeLedger, TradeContext
 from app.execution.machine import PaperPositionMachine
 from app.execution.types import PriceBar, TradePlan, TradingCosts
 from app.timeutil import IST
+
+HERO_ZERO_MESSAGE = "Hero-zero trade ignored: the option expires today."
+SAME_DAY_EXPIRY_PHRASES = frozenset(
+    {"today", "expiry today", "today expiry", "0dte", "0 dte", "hero zero", "herozero"}
+)
 
 
 @dataclass
@@ -46,13 +52,19 @@ class PaperTradeExecutor:
     async def prepare_new_trade(self, trade_id: int) -> PreparedTrade | None:
         """Creates the paper trade. Returns None when it was cancelled before it could start."""
         context = await self._ledger.load_trade_context(trade_id)
+        if is_stated_same_day_expiry(context.expiry, self._today()):
+            await self._cancel_hero_zero(trade_id)
+            return None
         try:
             quantity = self._config.quantity_for(context.underlying)
-            instrument_key = await self._resolve_instrument_key(context)
+            instrument_key, contract_expiry = await self._resolve_contract(context)
         except (UnknownLotSizeError, InstrumentNotFoundError) as error:
             await self._ledger.cancel_unstarted_trade(
                 trade_id, error.cancel_reason, self._clock(), self._config
             )
+            return None
+        if contract_expiry == self._today():
+            await self._cancel_hero_zero(trade_id)
             return None
         await self._ledger.open_paper_trade(trade_id, instrument_key, quantity, self._config)
         return self._assemble(context, instrument_key, quantity)
@@ -89,13 +101,22 @@ class PaperTradeExecutor:
         if events:
             await self._ledger.apply_events(prepared.context.trade_id, prepared.machine, events)
 
-    async def _resolve_instrument_key(self, context: TradeContext) -> str:
+    async def _cancel_hero_zero(self, trade_id: int) -> None:
+        await self._ledger.cancel_unstarted_trade(
+            trade_id, CancelReason.HERO_ZERO, self._clock(), self._config, HERO_ZERO_MESSAGE
+        )
+
+    def _today(self) -> date:
+        return self._clock().astimezone(IST).date()
+
+    async def _resolve_contract(self, context: TradeContext) -> tuple[str, date | None]:
+        """Returns the instrument key and, when freshly resolved, the contract expiry."""
         if context.instrument_key:
-            return context.instrument_key
+            return context.instrument_key, None
         instrument = await self._broker.resolve_instrument(
             context.underlying, context.expiry, context.strike, context.option_type
         )
-        return instrument.instrument_key
+        return instrument.instrument_key, instrument.expiry
 
     def _assemble(self, context: TradeContext, instrument_key: str, quantity: int) -> PreparedTrade:
         plan = self._build_plan(context, quantity)
@@ -117,3 +138,16 @@ class PaperTradeExecutor:
         signal_day = available_at.astimezone(IST).date()
         close_ist = datetime.combine(signal_day, self._config.market_close_exit, tzinfo=IST)
         return close_ist.astimezone(timezone.utc)
+
+
+def is_stated_same_day_expiry(expiry_text: str | None, today: date) -> bool:
+    """True when the signal itself says the option expires on ``today``."""
+    if expiry_text is None or not expiry_text.strip():
+        return False
+    phrase = " ".join(expiry_text.strip().lower().replace("-", " ").split())
+    if phrase in SAME_DAY_EXPIRY_PHRASES:
+        return True
+    try:
+        return parse_expiry_text(expiry_text, today) == today
+    except InstrumentNotFoundError:
+        return False

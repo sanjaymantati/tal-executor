@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ log = structlog.get_logger(__name__)
 MAX_ATTEMPTS = 2  # first call plus one retry on invalid output
 FINISHED_STATUSES = (ClassificationStatus.OK.value, ClassificationStatus.FAILED.value)
 NO_LLM_MODEL = "none"
+BARE_NUMBER = re.compile(r"\d+(?:\.\d+)?\Z")
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,7 @@ class MessageClassifier:
         async with self._session_factory() as session:
             message = await session.get(RawMessage, message_id)
             prompt = await self._build_prompt(session, message)
-        outcome = await self._obtain_outcome(message.text, prompt)
+        outcome = await self._obtain_outcome(message, prompt)
         await self._store_outcome(message, outcome)
 
     async def _build_prompt(self, session, message: RawMessage) -> str:
@@ -101,15 +103,26 @@ class MessageClassifier:
         newest_first = list(result.scalars())
         return [to_prompt_message(m) for m in reversed(newest_first)]
 
-    async def _obtain_outcome(self, text: str, prompt: str) -> ClassificationOutcome:
-        if not text.strip():
-            return self._build_empty_message_outcome()
+    async def _obtain_outcome(self, message: RawMessage, prompt: str) -> ClassificationOutcome:
+        if not message.text.strip():
+            return self._build_local_outcome(
+                ClassificationResult(
+                    message_type=MessageType.NOISE, confidence=1.0, fields=SignalFields()
+                )
+            )
+        premium = read_bare_premium(message.text)
+        if premium is not None and message.reply_to_msg_id is not None:
+            return self._build_local_outcome(
+                ClassificationResult(
+                    message_type=MessageType.PREMIUM_UPDATE,
+                    confidence=1.0,
+                    fields=SignalFields(current_premium=premium),
+                    references_msg_id=message.reply_to_msg_id,
+                )
+            )
         return await self._call_llm_with_retry(prompt)
 
-    def _build_empty_message_outcome(self) -> ClassificationOutcome:
-        result = ClassificationResult(
-            message_type=MessageType.NOISE, confidence=1.0, fields=SignalFields()
-        )
+    def _build_local_outcome(self, result: ClassificationResult) -> ClassificationOutcome:
         return ClassificationOutcome(
             status=ClassificationStatus.OK,
             result=result,
@@ -192,6 +205,14 @@ def parse_classification(raw_text: str) -> ClassificationResult | None:
         return ClassificationResult.model_validate(json.loads(raw_text))
     except (json.JSONDecodeError, ValidationError):
         return None
+
+
+def read_bare_premium(text: str) -> float | None:
+    """A message that is only a number, such as a replied premium quote."""
+    stripped = text.strip()
+    if BARE_NUMBER.fullmatch(stripped) is None:
+        return None
+    return float(stripped)
 
 
 def to_prompt_message(message: RawMessage) -> PromptMessage:

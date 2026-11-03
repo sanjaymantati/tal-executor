@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from app.db.models import PaperTrade, Trade
 from app.db.session import SessionFactory
-from app.enums import PaperTradeStatus
+from app.enums import ExitReason, PaperTradeStatus
 from app.timeutil import to_ist
 from app.ui.queries import label_trade
 
@@ -19,6 +19,7 @@ class ClosedTrade:
     label: str
     qty: int
     entry_price: float
+    stop_loss: float
     exit_price: float
     entry_time: datetime
     exit_time: datetime
@@ -26,6 +27,11 @@ class ClosedTrade:
     pnl: float
     r_multiple: float
     fees: float
+
+    @property
+    def risk_amount(self) -> float:
+        """Loss if the stop loss had been hit, before fees."""
+        return (self.entry_price - self.stop_loss) * self.qty
 
 
 class PnlQueries:
@@ -74,6 +80,7 @@ def to_closed_trade(paper: PaperTrade, trade: Trade) -> ClosedTrade:
         label=label_trade(trade),
         qty=paper.qty,
         entry_price=paper.entry_price,
+        stop_loss=trade.stop_loss,
         exit_price=paper.exit_price,
         entry_time=paper.entry_time,
         exit_time=paper.exit_time,
@@ -89,7 +96,11 @@ def summarise_trades(trades: list[ClosedTrade]) -> dict[str, Any]:
     losses = [t.pnl for t in trades if t.pnl < 0]
     net = sum(t.pnl for t in trades)
     fees = sum(t.fees for t in trades)
+    stop_loss_trades = [t for t in trades if t.exit_reason == ExitReason.SL_HIT.value]
     return {
+        "stop_loss_hits": len(stop_loss_trades),
+        "stop_loss_pnl": sum(t.pnl for t in stop_loss_trades),
+        "total_risk": sum(t.risk_amount for t in trades),
         "closed_trades": len(trades),
         "wins": len(wins),
         "losses": len(losses),
@@ -135,6 +146,8 @@ def describe_closed_trade(trade: ClosedTrade) -> dict[str, Any]:
         "label": trade.label,
         "qty": trade.qty,
         "entry_price": trade.entry_price,
+        "stop_loss": trade.stop_loss,
+        "risk_amount": trade.risk_amount,
         "exit_price": trade.exit_price,
         "entry_time": trade.entry_time,
         "exit_time": trade.exit_time,

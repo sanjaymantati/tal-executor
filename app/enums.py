@@ -61,6 +61,11 @@ class PaperTradeStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class LlmProvider(StrEnum):
+    OPENAI = "openai"
+    OLLAMA = "ollama"
+
+
 class ExitMode(StrEnum):
     RR = "RR"
     SIGNAL_TARGETS = "SIGNAL_TARGETS"
@@ -82,6 +87,7 @@ class CancelReason(StrEnum):
     INSTRUMENT_NOT_FOUND = "INSTRUMENT_NOT_FOUND"
     UNKNOWN_LOT_SIZE = "UNKNOWN_LOT_SIZE"
     MANUAL_STOP = "MANUAL_STOP"
+    HERO_ZERO = "HERO_ZERO"
 
 
 class StopRequestResult(StrEnum):

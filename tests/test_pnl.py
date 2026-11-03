@@ -11,6 +11,7 @@ def closed_trade(trade_id: int, pnl: float, exit_time: datetime, fees: float = 0
         label=f"#{trade_id} NIFTY 24500 CE",
         qty=75,
         entry_price=100,
+        stop_loss=90,
         exit_price=100 + pnl / 75,
         entry_time=exit_time - timedelta(minutes=5),
         exit_time=exit_time,
@@ -40,6 +41,18 @@ def test_summary_counts_wins_losses_and_ratios():
     assert summary["average_win"] == 375 and summary["average_loss"] == -300
     assert (summary["best_trade"], summary["worst_trade"]) == (600, -300)
     assert summary["profit_factor"] == 750 / 300
+
+
+def test_summary_reports_stop_loss_exits_and_risk():
+    summary = summarise_trades(TRADES)
+
+    assert summary["stop_loss_hits"] == 1
+    assert summary["stop_loss_pnl"] == -300
+    assert summary["total_risk"] == 3 * (100 - 90) * 75
+
+
+def test_risk_amount_is_the_loss_at_stop_loss():
+    assert TRADES[0].risk_amount == 750
 
 
 def test_summary_without_trades_has_no_ratios():

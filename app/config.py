@@ -1,9 +1,13 @@
 from datetime import time
 
-from pydantic import BaseModel, ConfigDict
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.enums import CancelReason, ExitMode
+from app.enums import CancelReason, ExitMode, LlmProvider
+
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 
 class UnknownLotSizeError(Exception):
@@ -46,9 +50,23 @@ class Settings(DatabaseSettings):
     tg_channel: str
     backfill_initial_limit: int = 0
 
-    openai_api_key: str
+    llm_provider: LlmProvider = LlmProvider.OPENAI
+    openai_api_key: str = ""
     openai_model: str
+    openai_base_url: str = ""
+    openai_proxy: str = ""
     classifier_context_size: int = 10
+
+    @model_validator(mode="after")
+    def apply_llm_defaults(self) -> Self:
+        if self.llm_provider == LlmProvider.OPENAI and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        if self.llm_provider == LlmProvider.OLLAMA:
+            if not self.openai_api_key:
+                self.openai_api_key = "ollama"
+            if not self.openai_base_url.strip():
+                self.openai_base_url = DEFAULT_OLLAMA_BASE_URL
+        return self
 
     upstox_api_key: str = ""
     upstox_api_secret: str = ""

@@ -22,7 +22,7 @@ from app.db.message_store import IncomingMessage, RawMessageStore
 from app.db.models import Base, MessageClassification, RawMessage
 from app.db.session import create_engine, create_session_factory
 from app.llm.classifier import MessageClassifier
-from app.llm.client import OpenAiLlmClient
+from app.llm.factory import build_llm_client
 from app.llm.prompts import PROMPT_VERSION
 from tests.conftest import BASE_TIME, CHANNEL_ID
 
@@ -39,7 +39,7 @@ async def evaluate(fixture_path: Path) -> None:
             await connection.run_sync(Base.metadata.create_all)
         session_factory = create_session_factory(engine)
         await load_samples(RawMessageStore(session_factory), samples)
-        llm = OpenAiLlmClient(settings.openai_api_key, settings.openai_model)
+        llm = build_llm_client(settings)
         classifier = MessageClassifier(
             session_factory,
             llm,

@@ -128,6 +128,44 @@ async def test_empty_text_is_noise_without_calling_the_llm(session_factory):
     assert classification.message_type == MessageType.NOISE.value
 
 
+async def test_numeric_reply_is_a_premium_update_without_calling_the_llm(session_factory):
+    store = RawMessageStore(session_factory)
+    await store.save_new_message(make_message(2, "215", 1, 1))
+    await store.save_new_message(make_message(3, "  42.5  ", 2, 1))
+    llm = ScriptedLlm([])
+
+    await build_classifier(session_factory, llm).classify_pending()
+
+    first, second = await load_classifications(session_factory)
+    assert llm.calls == 0
+    assert first.message_type == MessageType.PREMIUM_UPDATE.value
+    assert first.fields_json["current_premium"] == 215
+    assert first.references_msg_id == 1
+    assert first.confidence == 1
+    assert first.model == "none"
+    assert first.tokens is None
+    assert second.fields_json["current_premium"] == 42.5
+    assert second.references_msg_id == 1
+
+
+async def test_bare_number_without_a_reply_still_calls_the_llm(session_factory):
+    await RawMessageStore(session_factory).save_new_message(make_message(1, "215", 0, None))
+    llm = ScriptedLlm([VALID_NOISE])
+
+    await build_classifier(session_factory, llm).classify_pending()
+
+    assert llm.calls == 1
+
+
+async def test_reply_that_is_not_only_a_number_still_calls_the_llm(session_factory):
+    await RawMessageStore(session_factory).save_new_message(make_message(1, "SL 180", 0, 9))
+    llm = ScriptedLlm([VALID_NOISE])
+
+    await build_classifier(session_factory, llm).classify_pending()
+
+    assert llm.calls == 1
+
+
 async def test_edited_message_is_reclassified(session_factory):
     store = RawMessageStore(session_factory)
     await store.save_new_message(make_message(1, "first version", 0, None))
