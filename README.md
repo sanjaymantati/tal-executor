@@ -66,8 +66,9 @@ in the same process as the pipeline. If the dashboard cannot bind its address it
 do not run it next to `run` on the same port.
 
 - **Health cards:** Upstox (reads the NIFTY 50 LTP with your token and shows the token's expiry) and
-  Telegram (probes a temporary copy of the session file, shows the account and channel name).
-  Both are on-demand ("Check now"); Upstox also refreshes every minute.
+  Telegram (while the pipeline runs it shows the listener's own state; it only probes a temporary copy of
+  the session file when no pipeline is running, because a second connection steals live messages from the
+  listener). Upstox also refreshes every minute.
 - **Header:** channel name, and whether the pipeline is running (a heartbeat file, `STATUS_FILE`).
 - **Live messages:** every captured message with the LLM's type, confidence and extracted fields,
   and the trade it was linked to. Refreshes every 2 seconds.

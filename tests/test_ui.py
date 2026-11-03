@@ -19,6 +19,7 @@ from app.llm.classifier import MessageClassifier
 from app.llm.prompts import PROMPT_VERSION
 from app.status import PipelineStatusStore
 from app.ui.health import (
+    ListenerAwareTelegramHealth,
     UpstoxHealthCheck,
     describe_token_expiry,
     interpret_probe_response,
@@ -223,6 +224,60 @@ async def test_upstox_check_never_returns_the_token():
 
     assert result["ok"] is True
     assert token not in json.dumps(result, default=str)
+
+
+class CountingProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def check(self) -> dict:
+        self.calls += 1
+        return {"ok": True, "message": "probed"}
+
+
+async def test_telegram_health_does_not_probe_while_pipeline_listens(tmp_path: Path):
+    status_store = PipelineStatusStore(tmp_path / "status.json", lambda: NOW)
+    status_store.touch_heartbeat()
+    status_store.update_telegram("listening", -100123, "Alpha Calls")
+    probe = CountingProbe()
+
+    result = await ListenerAwareTelegramHealth(status_store, probe, lambda: NOW).check()
+
+    assert probe.calls == 0
+    assert result["ok"] is True
+    assert result["channel_title"] == "Alpha Calls"
+
+
+async def test_telegram_health_reports_not_ok_while_pipeline_is_reconnecting(tmp_path: Path):
+    status_store = PipelineStatusStore(tmp_path / "status.json", lambda: NOW)
+    status_store.touch_heartbeat()
+    status_store.update_telegram("disconnected", -100123, "Alpha Calls")
+
+    result = await ListenerAwareTelegramHealth(status_store, CountingProbe(), lambda: NOW).check()
+
+    assert result["ok"] is False
+
+
+async def test_telegram_health_probes_when_no_pipeline_is_running(tmp_path: Path):
+    status_store = PipelineStatusStore(tmp_path / "status.json", lambda: NOW)
+    probe = CountingProbe()
+
+    result = await ListenerAwareTelegramHealth(status_store, probe, lambda: NOW).check()
+
+    assert probe.calls == 1
+    assert result["message"] == "probed"
+
+
+async def test_telegram_health_probes_when_heartbeat_is_stale(tmp_path: Path):
+    stale_clock = {"now": NOW - timedelta(minutes=5)}
+    status_store = PipelineStatusStore(tmp_path / "status.json", lambda: stale_clock["now"])
+    status_store.touch_heartbeat()
+    stale_clock["now"] = NOW
+    probe = CountingProbe()
+
+    await ListenerAwareTelegramHealth(status_store, probe, lambda: NOW).check()
+
+    assert probe.calls == 1
 
 
 async def test_dashboard_can_run_beside_other_tasks_and_stop_on_cancel():

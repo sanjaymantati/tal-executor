@@ -4,6 +4,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+HEARTBEAT_MAX_AGE_SEC = 20
+
 
 class PipelineStatusStore:
     """Tiny JSON file the live pipeline writes and the UI reads (heartbeat + Telegram state)."""
@@ -11,6 +13,13 @@ class PipelineStatusStore:
     def __init__(self, path: Path, clock: Callable[[], datetime]) -> None:
         self._path = path
         self._clock = clock
+
+    def is_pipeline_running(self) -> bool:
+        heartbeat = self.read().get("heartbeat_at")
+        if heartbeat is None:
+            return False
+        age_sec = (self._clock() - datetime.fromisoformat(heartbeat)).total_seconds()
+        return age_sec <= HEARTBEAT_MAX_AGE_SEC
 
     def update_telegram(
         self, state: str, channel_id: int | None, channel_title: str | None

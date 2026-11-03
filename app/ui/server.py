@@ -15,7 +15,7 @@ from app.broker.base import BrokerAuthError
 from app.enums import StopRequestResult
 from app.execution.ledger import PaperTradeLedger
 from app.execution.replay import TradeReplayer
-from app.status import PipelineStatusStore
+from app.status import HEARTBEAT_MAX_AGE_SEC, PipelineStatusStore
 from app.ui.health import HealthCheck
 from app.ui.pnl import PnlQueries
 from app.ui.queries import DashboardQueries
@@ -23,7 +23,6 @@ from app.ui.queries import DashboardQueries
 log = structlog.get_logger(__name__)
 
 INDEX_FILE = Path(__file__).parent / "static" / "index.html"
-HEARTBEAT_MAX_AGE_SEC = 20
 
 
 @dataclass

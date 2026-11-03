@@ -11,6 +11,8 @@ from typing import Any, Protocol
 import httpx
 from telethon import TelegramClient, utils
 
+from app.status import PipelineStatusStore
+
 # Market data is all the app needs, and it is what read-only (analytics) tokens allow;
 # the profile endpoint rejects those tokens, so it would be a misleading health signal.
 UPSTOX_PROBE_URL = "https://api.upstox.com/v2/market-quote/ltp"
@@ -52,11 +54,44 @@ class UpstoxHealthCheck:
         return {**result, **interpret_probe_response(response)}
 
 
+class ListenerAwareTelegramHealth:
+    """Reports the running listener's own state instead of probing Telegram.
+
+    Telegram delivers live updates to the newest connection of a login, so a probe opened while the
+    pipeline listens silently steals its messages. A probe is only safe when nothing is listening.
+    """
+
+    def __init__(
+        self, status_store: PipelineStatusStore, probe: HealthCheck, clock: Callable[[], datetime]
+    ) -> None:
+        self._status_store = status_store
+        self._probe = probe
+        self._clock = clock
+
+    async def check(self) -> dict[str, Any]:
+        if not self._status_store.is_pipeline_running():
+            return await self._probe.check()
+        return self._describe_listener(self._status_store.read().get("telegram", {}))
+
+    def _describe_listener(self, telegram: dict[str, Any]) -> dict[str, Any]:
+        state = telegram.get("state")
+        return {
+            "checked_at": self._clock(),
+            "ok": state == "listening",
+            "authorized": True,
+            "session_file_exists": True,
+            "message": f"Pipeline is running, Telegram {state or 'state unknown'}",
+            "channel_title": telegram.get("channel_title"),
+            "channel_id": telegram.get("channel_id"),
+        }
+
+
 class TelegramHealthCheck:
     """Probes the saved Telegram session using a throw-away copy of the session file.
 
-    The copy keeps the live pipeline's session file untouched. The probe connects with the same
-    login from the same machine, which Telegram allows, but it is on-demand, not polled.
+    The copy keeps the live pipeline's session file untouched, but the probe is a second connection
+    with the same login, which steals live updates from a running listener. Only run it when no
+    pipeline is listening (see ListenerAwareTelegramHealth).
     """
 
     def __init__(
