@@ -31,6 +31,7 @@ class OpenAiLlmClient:
             client_kwargs["base_url"] = base_url
         if http_client is not None:
             client_kwargs["http_client"] = http_client
+        print(client_kwargs)
         self._client = AsyncOpenAI(**client_kwargs)
         self._model = model
         self._prefer_json_response_format = prefer_json_response_format

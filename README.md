@@ -21,7 +21,7 @@ python get_chat_id.py           # find your channel's chat id for TG_CHANNEL
 ```
 
 Use a dedicated Telegram account for the listener. The first run asks for the login code.
-`LOT_SIZE_MAP` in `.env` must be checked against current exchange lot sizes.
+`LOT_SIZE_MAP` in `.env` must be checked against current exchange lot sizes. NSE (NSE_FO) and BSE (BSE_FO, e.g. SENSEX, BANKEX) index options are both supported; add each underlying you trade to `LOT_SIZE_MAP`.
 `UPSTOX_ACCESS_TOKEN` must be a token for the **live** API (api.upstox.com); sandbox tokens
 (30 days, issued for the sandbox) are rejected. The app only reads market data (instrument file,
 LTP, candles) and never places orders, so a read-only token that allows market data is enough.

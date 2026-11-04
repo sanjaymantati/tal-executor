@@ -76,7 +76,7 @@ class Settings(DatabaseSettings):
 
     broker: str = "upstox"
     lots: int = 1
-    lot_size_map: dict[str, int] = {"NIFTY": 75, "BANKNIFTY": 30}
+    lot_size_map: dict[str, int] = {"NIFTY": 75, "BANKNIFTY": 30, "SENSEX": 20, "BANKEX": 30}
     rr_reward: float = 2
     rr_risk: float = 1
     exit_mode: ExitMode = ExitMode.RR

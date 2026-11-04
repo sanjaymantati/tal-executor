@@ -12,8 +12,9 @@ from app.timeutil import IST
 
 log = structlog.get_logger(__name__)
 
-NSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-OPTION_SEGMENT = "NSE_FO"
+INSTRUMENTS_URL_TEMPLATE = "https://assets.upstox.com/market-quote/instruments/exchange/{exchange}.json.gz"
+OPTION_SEGMENT_BY_EXCHANGE = {"NSE": "NSE_FO", "BSE": "BSE_FO"}
+OPTION_SEGMENTS = frozenset(OPTION_SEGMENT_BY_EXCHANGE.values())
 OPTION_TYPES = ("CE", "PE")
 EXPIRY_TEXT_FORMATS = (
     "%Y-%m-%d",
@@ -86,15 +87,22 @@ class InstrumentMaster:
         return self._clock().astimezone(IST).date()
 
     async def _read_records(self, today: date) -> list[dict]:
-        cache_file = self._cache_dir / f"NSE_{today.isoformat()}.json.gz"
+        records: list[dict] = []
+        for exchange in OPTION_SEGMENT_BY_EXCHANGE:
+            records += await self._read_exchange_records(exchange, today)
+        return records
+
+    async def _read_exchange_records(self, exchange: str, today: date) -> list[dict]:
+        cache_file = self._cache_dir / f"{exchange}_{today.isoformat()}.json.gz"
         if not cache_file.exists():
-            await self._download(cache_file)
+            await self._download(exchange, cache_file)
         with gzip.open(cache_file, "rt", encoding="utf-8") as handle:
             return json.load(handle)
 
-    async def _download(self, cache_file: Path) -> None:
-        log.info("instrument_master_download", url=NSE_INSTRUMENTS_URL)
-        response = await self._http_client.get(NSE_INSTRUMENTS_URL, follow_redirects=True)
+    async def _download(self, exchange: str, cache_file: Path) -> None:
+        url = INSTRUMENTS_URL_TEMPLATE.format(exchange=exchange)
+        log.info("instrument_master_download", url=url)
+        response = await self._http_client.get(url, follow_redirects=True)
         response.raise_for_status()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file.write_bytes(response.content)
@@ -104,7 +112,7 @@ def parse_option_instruments(records: list[dict]) -> list[Instrument]:
     return [
         build_instrument(record)
         for record in records
-        if record.get("segment") == OPTION_SEGMENT
+        if record.get("segment") in OPTION_SEGMENTS
         and record.get("instrument_type") in OPTION_TYPES
     ]
 

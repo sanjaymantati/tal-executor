@@ -47,7 +47,7 @@ Use null for anything absent.
 Use [] if none.
 - Entry range such as 140-145 gives entry_low=140, entry_high=145. A single entry price gives \
 both entry_low and entry_high equal to it.
-- underlying is the index name in upper case, e.g. NIFTY or BANKNIFTY.
+- underlying is the index name in upper case, e.g. NIFTY, BANKNIFTY, SENSEX or BANKEX.
 - expiry: use an ISO date YYYY-MM-DD when the full date is clear, otherwise copy the text as \
 written (e.g. "30 JAN"), otherwise null.
 - strike is the strike price number only.

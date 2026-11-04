@@ -25,9 +25,11 @@ def expiry_ms(day: date) -> int:
     return int(datetime(day.year, day.month, day.day, tzinfo=IST).timestamp() * 1000)
 
 
-def option_record(key: str, underlying: str, strike: float, kind: str, expiry: date) -> dict:
+def option_record(
+    key: str, underlying: str, strike: float, kind: str, expiry: date, segment: str = "NSE_FO"
+) -> dict:
     return {
-        "segment": "NSE_FO",
+        "segment": segment,
         "instrument_key": key,
         "trading_symbol": f"{underlying} {strike} {kind}",
         "underlying_symbol": underlying,
@@ -37,6 +39,14 @@ def option_record(key: str, underlying: str, strike: float, kind: str, expiry: d
         "lot_size": 30,
     }
 
+
+BSE_RECORDS = [
+    option_record("BSE_FO|1", "SENSEX", 80000, "CE", date(2026, 11, 5), "BSE_FO"),
+    option_record("BSE_FO|2", "SENSEX", 80000, "CE", date(2026, 11, 12), "BSE_FO"),
+    option_record("BSE_FO|3", "SENSEX", 80000, "PE", date(2026, 11, 5), "BSE_FO"),
+    option_record("BSE_FO|4", "SENSEX", 80000, "CE", date(2026, 10, 29), "BSE_FO"),  # expired
+    {"segment": "BSE_EQ", "instrument_key": "BSE_EQ|9", "instrument_type": "EQ"},
+]
 
 RECORDS = [
     option_record("NSE_FO|1", "BANKNIFTY", 52000, "CE", date(2026, 11, 26)),
@@ -50,11 +60,21 @@ RECORDS = [
 
 
 def build_index() -> InstrumentIndex:
-    return InstrumentIndex(parse_option_instruments(RECORDS))
+    return InstrumentIndex(parse_option_instruments(RECORDS + BSE_RECORDS))
 
 
 def test_only_option_contracts_are_indexed():
-    assert len(parse_option_instruments(RECORDS)) == 5
+    assert len(parse_option_instruments(RECORDS + BSE_RECORDS)) == 9
+
+
+def test_bse_option_is_found_with_nearest_expiry():
+    found = build_index().find_option("SENSEX", None, 80000, "CE", TODAY)
+    assert found.instrument_key == "BSE_FO|1"
+
+
+def test_bse_explicit_expiry_is_respected():
+    found = build_index().find_option("SENSEX", date(2026, 11, 12), 80000, "CE", TODAY)
+    assert found.instrument_key == "BSE_FO|2"
 
 
 def test_nearest_expiry_is_chosen_when_none_is_given():
@@ -102,7 +122,8 @@ class Downloads:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.count += 1
-        return httpx.Response(200, content=gzip.compress(json.dumps(RECORDS).encode()))
+        records = BSE_RECORDS if "/BSE.json.gz" in str(request.url) else RECORDS
+        return httpx.Response(200, content=gzip.compress(json.dumps(records).encode()))
 
 
 async def test_instrument_master_downloads_once_per_ist_day(tmp_path: Path):
@@ -112,17 +133,17 @@ async def test_instrument_master_downloads_once_per_ist_day(tmp_path: Path):
         master = InstrumentMaster(client, tmp_path, lambda: clock_value[0])
         await master.load_index()
         await master.load_index()
-        assert downloads.count == 1
+        assert downloads.count == 2  # one file per exchange
 
         # A fresh process the same day reuses the on-disk cache.
         await InstrumentMaster(client, tmp_path, lambda: clock_value[0]).load_index()
-        assert downloads.count == 1
+        assert downloads.count == 2
 
         clock_value[0] = NOW + timedelta(days=1)
         await master.load_index()
-        assert downloads.count == 2
+        assert downloads.count == 4
 
-
+    
 def build_broker(handler, tmp_path: Path, client: httpx.AsyncClient) -> UpstoxBroker:
     master = InstrumentMaster(client, tmp_path, lambda: NOW)
     return UpstoxBroker(client, "secret-token", master, 0.0, lambda: NOW)
@@ -242,3 +263,11 @@ async def test_stream_ltp_delivers_each_poll_until_cancelled(tmp_path: Path):
         task.cancel()
 
     assert received[:3] == [("NSE_FO|1", 100.0)] * 3
+
+
+def test_bse_underlyings_have_default_lot_sizes():
+    from app.config import Settings
+
+    lot_sizes = Settings.model_fields['lot_size_map'].default
+    assert {'SENSEX', 'BANKEX'} <= set(lot_sizes)
+
