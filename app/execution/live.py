@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import structlog
 
@@ -11,6 +11,8 @@ from app.execution.executor import PaperTradeExecutor, PreparedTrade
 from app.execution.types import PriceBar
 
 log = structlog.get_logger(__name__)
+
+PRICE_RETRY_INTERVAL = timedelta(seconds=60)
 
 
 @dataclass
@@ -22,6 +24,7 @@ class Watch:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_price: float | None = None
     last_time: datetime | None = None
+    price_retry_at: datetime | None = None
     task: asyncio.Task | None = None
 
     @property
@@ -61,7 +64,7 @@ class LiveTradeWatcher:
     async def apply_stop_requests(self) -> int:
         stopped = 0
         for watch in list(self._watches.values()):
-            if watch.is_running and await self._executor.has_pending_stop_request(watch.trade_id):
+            if self._can_settle(watch) and await self._executor.has_pending_stop_request(watch.trade_id):
                 stopped += await self._stop_manually(watch)
         return stopped
 
@@ -72,7 +75,7 @@ class LiveTradeWatcher:
         """
         closed = 0
         for watch in list(self._watches.values()):
-            if watch.is_running and self._clock() >= watch.prepared.plan.market_close_at:
+            if self._can_settle(watch) and self._is_past_market_close(watch):
                 closed += await self._close_at_market_close(watch)
         return closed
 
@@ -112,7 +115,23 @@ class LiveTradeWatcher:
         self._watches[watch.trade_id] = watch
         log.info("watching_trade", trade_id=watch.trade_id, instrument_key=prepared.instrument_key)
 
+    def _can_settle(self, watch: Watch) -> bool:
+        return watch.is_running and not self._is_backing_off(watch)
+
+    def _is_backing_off(self, watch: Watch) -> bool:
+        return watch.price_retry_at is not None and self._clock() < watch.price_retry_at
+
+    def _back_off(self, watch: Watch) -> None:
+        watch.price_retry_at = self._clock() + PRICE_RETRY_INTERVAL
+
+    def _is_past_market_close(self, watch: Watch) -> bool:
+        return self._clock() >= watch.prepared.plan.market_close_at
+
     async def _watch(self, watch: Watch) -> None:
+        if self._is_past_market_close(watch):
+            await watch.finished.wait()  # no price stream after close; settling is retried by sync_watches
+            return
+
         async def on_ltp(instrument_key: str, price: float, time: datetime) -> None:
             watch.last_price, watch.last_time = price, time
             async with watch.lock:
@@ -137,6 +156,7 @@ class LiveTradeWatcher:
             price = await self._find_closing_price(watch)
         except Exception as error:
             log.warning("manual_stop_price_unavailable", trade_id=watch.trade_id, error=repr(error))
+            self._back_off(watch)
             return 0
         async with watch.lock:
             await self._executor.stop_manually(watch.prepared, price, self._clock())
@@ -150,6 +170,7 @@ class LiveTradeWatcher:
             price = await self._find_closing_price(watch)
         except Exception as error:
             log.warning("market_close_price_unavailable", trade_id=watch.trade_id, error=repr(error))
+            self._back_off(watch)
             return 0
         async with watch.lock:
             await self._executor.finish_session(watch.prepared, price, self._clock())

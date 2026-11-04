@@ -9,12 +9,13 @@ import httpx
 import pytest_asyncio
 from fastapi import FastAPI
 
-from app.db.models import PaperTrade
+from app.db.models import PaperTrade, Trade
 from app.enums import PaperTradeStatus
 from app.assembler.assembler import TradeAssembler
 from app.assembler.matching import TradeMatcher
 from app.db.message_store import RawMessageStore
 from app.execution.replay import TradeReplayer
+from app.execution.types import TradingCosts
 from app.llm.classifier import MessageClassifier
 from app.llm.prompts import PROMPT_VERSION
 from app.status import PipelineStatusStore
@@ -27,6 +28,7 @@ from app.ui.health import (
 )
 from app.execution.ledger import PaperTradeLedger
 from app.ui.pnl import PnlQueries
+from app.ui.premiums import LivePriceQuotes, calculate_live_pnl
 from app.ui.queries import DashboardQueries
 from app.ui.server import UiServices, create_app, serve_dashboard
 from tests.conftest import BASE_TIME, make_message
@@ -64,7 +66,9 @@ async def ui(session_factory, tmp_path: Path):
     )
     status_store = PipelineStatusStore(tmp_path / "status.json", lambda: NOW)
     services = UiServices(
-        queries=DashboardQueries(session_factory),
+        queries=DashboardQueries(
+            session_factory, LivePriceQuotes(broker), TradingCosts(0, 0), lambda: NOW
+        ),
         pnl=PnlQueries(session_factory),
         ledger=PaperTradeLedger(session_factory),
         upstox_health=StaticHealth({"ok": True, "message": "Upstox token is valid"}),
@@ -78,6 +82,7 @@ async def ui(session_factory, tmp_path: Path):
     transport = httpx.ASGITransport(app=create_app(services))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         client.status_store = status_store
+        client.broker = broker
         yield client
 
 
@@ -148,6 +153,122 @@ async def test_stop_endpoint_queues_a_request_for_a_running_paper_trade(ui, sess
     assert second.json()["result"] == "ALREADY_REQUESTED"
     paper = next(t for t in (await ui.get("/api/trades")).json() if t["id"] == 1)["paper_trade"]
     assert paper["stoppable"] is True and paper["stop_requested"] is True
+
+
+async def add_paper_trade(session_factory, status: PaperTradeStatus, **values) -> None:
+    async with session_factory.begin() as session:
+        trade = await session.get(Trade, 1)
+        trade.instrument_key = "NSE_FO|1"
+        session.add(PaperTrade(trade_id=1, qty=30, status=status.value, **values))
+
+
+async def find_paper_trade(ui) -> dict:
+    return next(t for t in (await ui.get("/api/trades")).json() if t["id"] == 1)["paper_trade"]
+
+
+async def test_open_paper_trade_shows_live_premium_and_unrealised_pnl(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+    ui.broker.ticks = [150.0]
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["current_premium"] == 150.0
+    assert paper["premium_error_code"] is None
+    assert paper["live_pnl"] == 300.0
+    detail = (await ui.get("/api/trades/1")).json()["paper_trade"]
+    assert detail["live_pnl"] == 300.0
+
+
+async def test_pending_paper_trade_shows_premium_but_no_pnl(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.PENDING)
+    ui.broker.ticks = [150.0]
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["current_premium"] == 150.0
+    assert paper["live_pnl"] is None
+
+
+async def test_active_trade_reports_premium_unavailable_when_broker_fails(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+    ui.broker.fail_ltp = True
+
+    response = await ui.get("/api/trades")
+
+    paper = next(t for t in response.json() if t["id"] == 1)["paper_trade"]
+    assert response.status_code == 200
+    assert paper["current_premium"] is None
+    assert paper["premium_error_code"] == 404
+    assert paper["live_pnl"] is None
+
+
+async def test_active_trade_reports_http_429_when_broker_rate_limits(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+    ui.broker.ltp_http_status = 429
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["premium_error_code"] == 429
+    assert paper["current_premium"] is None
+    assert paper["live_pnl"] is None
+
+
+async def test_active_trade_reports_http_404_for_other_broker_http_errors(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+    ui.broker.ltp_http_status = 500
+
+    assert (await find_paper_trade(ui))["premium_error_code"] == 404
+
+
+async def test_active_trade_reports_premium_unavailable_when_no_quote_returned(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["premium_error_code"] == 404
+
+
+async def test_trade_left_active_from_an_earlier_day_is_not_priced(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.OPEN, entry_price=140)
+    async with session_factory.begin() as session:
+        (await session.get(Trade, 1)).created_at = NOW - timedelta(days=2)
+    ui.broker.ticks = [150.0]
+
+    paper = await find_paper_trade(ui)
+
+    assert ui.broker.ltps_calls == 0
+    assert paper["premium_error_code"] == 404
+    assert paper["live_pnl"] is None
+
+
+async def test_closed_paper_trade_shows_realised_pnl_and_no_live_premium(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.CLOSED, entry_price=140, pnl=-120.0)
+    ui.broker.ticks = [150.0]
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["live_pnl"] == -120.0
+    assert paper["current_premium"] is None
+    assert paper["premium_error_code"] is None
+
+
+async def test_cancelled_paper_trade_shows_no_premium_and_no_pnl(ui, session_factory):
+    await add_paper_trade(session_factory, PaperTradeStatus.CANCELLED)
+    ui.broker.ticks = [150.0]
+
+    paper = await find_paper_trade(ui)
+
+    assert paper["live_pnl"] is None
+    assert paper["current_premium"] is None
+    assert paper["premium_error_code"] is None
+
+
+def test_unrealised_pnl_applies_exit_slippage_and_round_trip_fees():
+    paper = PaperTrade(trade_id=1, qty=30, status=PaperTradeStatus.OPEN.value, entry_price=140)
+
+    pnl = calculate_live_pnl(paper, 150.0, TradingCosts(slippage=1, brokerage_per_order=20))
+
+    assert pnl == (150 - 1 - 140) * 30 - 40
 
 
 async def test_pnl_endpoint_summarises_closed_paper_trades(ui):

@@ -72,11 +72,16 @@ do not run it next to `run` on the same port.
 - **Health cards:** Upstox (reads the NIFTY 50 LTP with your token and shows the token's expiry) and
   Telegram (while the pipeline runs it shows the listener's own state; it only probes a temporary copy of
   the session file when no pipeline is running, because a second connection steals live messages from the
-  listener). Upstox also refreshes every minute.
+  listener). Upstox is checked when the page loads and when you click "Check now", not on a timer, so an idle
+  dashboard makes no Upstox calls.
 - **Header:** channel name, and whether the pipeline is running (a heartbeat file, `STATUS_FILE`).
 - **Live messages:** every captured message with the LLM's type, confidence and extracted fields,
   and the trade it was linked to. Refreshes every 2 seconds.
 - **Captured trades:** assembled trades; click a row for source messages, field changes and events.
+  Active paper trades (waiting to enter or open) show the live option premium from Upstox. When it cannot be
+  fetched the cell shows an `HTTP 404` chip (no price returned, or any other failure) or `HTTP 429` (Upstox
+  said too many requests). The P&L column is unrealised while a trade is open (what closing now would book,
+  after slippage and fees) and realised once it is closed; it is `-` for trades that have not entered.
 - **Mock trading and logs:** paper trades with P&L, the audit-trail log, and Replay buttons that
   simulate COMPLETE trades over today's 1-minute candles (useful when the pipeline is not running).
   Live paper trades are made automatically by the running pipeline.

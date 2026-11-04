@@ -3,6 +3,7 @@
     python -m app.main run                  # pipeline (ingest, classify, assemble, paper-trade) + dashboard
     python -m app.main run --no-dashboard   # pipeline only
     python -m app.main replay [--trade-id]  # paper-trade stored COMPLETE trades over historical candles
+    python -m app.main close-at-entry --trade-id N  # settle an open trade with no price at its entry price
     python -m app.ui                        # dashboard only (no listener), e.g. to browse stored data
 """
 
@@ -49,6 +50,8 @@ def main() -> None:
     configure_logging(settings.log_level)
     if args.command == "run":
         asyncio.run(run_pipeline(settings, with_dashboard=not args.no_dashboard))
+    elif args.command == "close-at-entry":
+        asyncio.run(close_trade_at_entry_price(settings, args.trade_id))
     else:
         asyncio.run(replay_trades(settings, args.trade_id))
 
@@ -60,6 +63,8 @@ def parse_arguments() -> argparse.Namespace:
     run.add_argument("--no-dashboard", action="store_true")
     replay = commands.add_parser("replay")
     replay.add_argument("--trade-id", type=int, default=None)
+    close = commands.add_parser("close-at-entry")
+    close.add_argument("--trade-id", type=int, required=True)
     return parser.parse_args()
 
 
@@ -154,6 +159,19 @@ async def replay_trades(settings: Settings, trade_id: int | None) -> None:
                 log.info("replay_finished", trades=await replayer.replay_all_new_trades())
             else:
                 log.info("replay_finished", replayed=await replayer.replay_trade(trade_id))
+        finally:
+            await engine.dispose()
+
+
+async def close_trade_at_entry_price(settings: Settings, trade_id: int) -> None:
+    """Stop the pipeline first: a running pipeline keeps its own copy of the open trade."""
+    engine = create_engine(settings.database_url)
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SEC) as http_client:
+        broker = build_broker(settings, http_client)
+        executor = build_executor(settings, create_session_factory(engine), broker)
+        try:
+            closed = await executor.close_open_trade_at_entry_price(trade_id)
+            log.info("close_at_entry_finished", trade_id=trade_id, closed=closed)
         finally:
             await engine.dispose()
 

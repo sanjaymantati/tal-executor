@@ -48,6 +48,8 @@
   .tag.PARTIAL, .tag.PENDING, .tag.PREMIUM_UPDATE, .tag.TARGET_LEVEL_TOUCHED { color: var(--amber); border-color: var(--amber); }
   .tag.SL_HIT, .tag.FAILED, .tag.CANCELLED, .tag.EXPIRED_INCOMPLETE, .tag.EXPIRED, .tag.EOD_EXIT { color: var(--red); border-color: var(--red); }
   .tag.RR_TARGET_HIT, .tag.TARGET_HIT, .tag.RR_TARGET { color: var(--green); border-color: var(--green); }
+  .tag.http-404 { color: var(--red); border-color: var(--red); }
+  .tag.http-429 { color: var(--amber); border-color: var(--amber); }
   .tag.MANUAL, .tag.MANUAL_EXIT, .tag.MANUAL_STOP_REQUESTED, .tag.MANUAL_STOP { color: var(--violet); border-color: var(--violet); }
   button { white-space: nowrap; }
   button.danger { border-color: var(--red); color: var(--red); }
@@ -238,6 +240,8 @@ async function refreshMessages() {
 
 // ---------- trades ----------
 const entryText = (t) => t.entry_low === null ? "-" : t.entry_low === t.entry_high ? fmtNum(t.entry_low) : `${fmtNum(t.entry_low)}-${fmtNum(t.entry_high)}`;
+const premiumView = (paper) => !paper ? "-" : paper.premium_error_code ? el("span", { class: `tag http-${paper.premium_error_code}`, title: "Live premium could not be fetched from Upstox" }, `HTTP ${paper.premium_error_code}`) : fmtNum(paper.current_premium);
+const livePnl = (paper) => paper ? paper.live_pnl : null;
 function tradeRow(t, onToggle) {
   return el("tr", { class: "click", onclick: onToggle },
     el("td", {}, `#${t.id}`),
@@ -246,6 +250,8 @@ function tradeRow(t, onToggle) {
     el("td", {}, entryText(t)),
     el("td", {}, fmtNum(t.stop_loss)),
     el("td", {}, t.targets.length ? t.targets.join(" / ") : "-"),
+    el("td", {}, premiumView(t.paper_trade)),
+    el("td", { class: signClass(livePnl(t.paper_trade)) }, fmtMoney(livePnl(t.paper_trade))),
     el("td", { class: "muted" }, t.message_count),
     el("td", { class: "muted" }, fmtTime(t.created_at)));
 }
@@ -254,12 +260,12 @@ async function refreshTrades() {
   const body = el("tbody", {});
   for (const t of trades) {
     body.append(tradeRow(t, () => toggleTrade(t.id)));
-    if (openTrades.has(t.id)) body.append(await detailRow(t.id, 8));
+    if (openTrades.has(t.id)) body.append(await detailRow(t.id, 10));
   }
   clear(document.getElementById("tab-trades"),
     trades.length === 0 ? el("div", { class: "empty" }, "No trades captured yet.")
     : el("div", { class: "scroll" }, el("table", {},
-        el("thead", {}, el("tr", {}, ...["ID", "Contract", "State", "Entry", "SL", "Targets", "Msgs", "Created"].map((t) => el("th", {}, t)))),
+        el("thead", {}, el("tr", {}, ...["ID", "Contract", "State", "Entry", "SL", "Targets", "Premium", "P&L", "Msgs", "Created"].map((t) => el("th", {}, t)))),
         body)));
 }
 async function detailRow(tradeId, columns) {
@@ -267,7 +273,7 @@ async function detailRow(tradeId, columns) {
   const section = (title, rows) => el("div", { style: "margin-bottom:10px" }, el("div", { class: "muted" }, title), ...rows);
   const stop = stopControl(d);
   return el("tr", { class: "detail" }, el("td", { colspan: columns },
-    stop ? section("Paper trade", [el("div", {}, `status ${d.paper_trade.status}  `, stop)]) : null,
+    d.paper_trade ? section("Paper trade", [el("div", {}, `status ${d.paper_trade.status}  premium `, premiumView(d.paper_trade), "  P&L ", el("span", { class: signClass(livePnl(d.paper_trade)) }, fmtMoney(livePnl(d.paper_trade))), "  ", stop)]) : null,
     section("Source messages", d.messages.map((m) => el("div", { class: "text" }, `${fmtTime(m.sent_at)}  `, tag(m.role), `  #${m.tg_message_id}  ${m.text}`))),
     section("Field changes", d.field_history.length ? d.field_history.map((h) => el("div", {}, `${fmtTime(h.changed_at)}  ${h.field}: ${h.old_value} -> ${h.new_value}`)) : [el("div", { class: "muted" }, "none")]),
     section("Events", d.events.length ? d.events.map(eventLine) : [el("div", { class: "muted" }, "none")])));
@@ -456,7 +462,6 @@ document.getElementById("tabs").addEventListener("click", (e) => { if (e.target.
 
 setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleTimeString("en-IN", { timeZone: IST, hour12: false }) + " IST"; }, 1000);
 setInterval(() => { refreshHeader().catch(console.error); refreshActive(); }, 2000);
-setInterval(checkUpstox, 60000);
 refreshHeader().catch(console.error); refreshActive(); checkTelegram(); checkUpstox();
 </script>
 </body>

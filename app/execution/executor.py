@@ -90,6 +90,18 @@ class PaperTradeExecutor:
         events = prepared.machine.end_session(price, time)
         await self._persist(prepared, events)
 
+    async def close_open_trade_at_entry_price(self, trade_id: int) -> bool:
+        """Settles an open trade whose contract no longer has a price. Books a manual exit at its own entry.
+
+        Returns False when the trade is not open, so nothing is changed.
+        """
+        saved = await self._ledger.load_saved_position(trade_id)
+        if saved.status is not PaperTradeStatus.OPEN:
+            return False
+        prepared = await self.prepare_unfinished_trade(trade_id)
+        await self.stop_manually(prepared, saved.entry_price, self._clock())
+        return True
+
     async def has_pending_stop_request(self, trade_id: int) -> bool:
         return await self._ledger.has_pending_stop_request(trade_id)
 

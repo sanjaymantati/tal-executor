@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -13,19 +14,35 @@ from app.db.models import (
     TradeMessage,
 )
 from app.db.session import SessionFactory
-from app.enums import ClassificationStatus, EventType, PaperTradeStatus
+from app.enums import ClassificationStatus, EventType
+from app.execution.types import TradingCosts
 from app.report import ReportBuilder
+from app.ui.premiums import (
+    ACTIVE_PAPER_STATUSES,
+    LivePriceQuotes,
+    describe_live_values,
+    is_active_paper_trade,
+    is_from_earlier_session,
+)
 
 MAX_LIMIT = 500
 FINISHED_STATUSES = (ClassificationStatus.OK.value, ClassificationStatus.FAILED.value)
-UNFINISHED_PAPER_STATUSES = (PaperTradeStatus.PENDING.value, PaperTradeStatus.OPEN.value)
 
 
 class DashboardQueries:
     """Read-only views of the database for the dashboard."""
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        quotes: LivePriceQuotes,
+        costs: TradingCosts,
+        clock: Callable[[], datetime],
+    ) -> None:
         self._session_factory = session_factory
+        self._quotes = quotes
+        self._costs = costs
+        self._clock = clock
 
     async def summarise(self) -> dict[str, Any]:
         report = await ReportBuilder(self._session_factory).build_report()
@@ -79,12 +96,13 @@ class DashboardQueries:
             papers = await self._load_paper_trades(session, ids)
             message_counts = await self._count_trade_messages(session, ids)
             stop_requested = await self._load_stop_requested_trade_ids(session, ids)
+        live_values = await self._find_live_values(trades, papers)
         return [
             {
                 **describe_trade(trade),
                 "message_count": message_counts.get(trade.id, 0),
                 "paper_trade": describe_paper_trade(
-                    papers.get(trade.id), trade.id in stop_requested
+                    papers.get(trade.id), trade.id in stop_requested, live_values.get(trade.id)
                 ),
             }
             for trade in trades
@@ -100,9 +118,12 @@ class DashboardQueries:
             history = await self._load_field_history(session, trade_id)
             events = await self._load_trade_events(session, trade_id)
             stop_requested = await self._load_stop_requested_trade_ids(session, [trade_id])
+        live_values = await self._find_live_values([trade], paper)
         return {
             **describe_trade(trade),
-            "paper_trade": describe_paper_trade(paper.get(trade_id), trade_id in stop_requested),
+            "paper_trade": describe_paper_trade(
+                paper.get(trade_id), trade_id in stop_requested, live_values.get(trade_id)
+            ),
             "messages": messages,
             "field_history": history,
             "events": events,
@@ -120,6 +141,19 @@ class DashboardQueries:
                 {**describe_event(event), "trade": label_trade(trade)}
                 for event, trade in result.all()
             ]
+
+    async def _find_live_values(
+        self, trades: list[Trade], papers: dict[int, PaperTrade]
+    ) -> dict[int, dict[str, Any]]:
+        keys = find_live_instrument_keys(trades, papers, self._clock())
+        premiums = await self._quotes.find_premiums(keys)
+        return {
+            trade.id: describe_live_values(
+                papers[trade.id], premiums, trade.instrument_key, self._costs
+            )
+            for trade in trades
+            if trade.id in papers
+        }
 
     async def _count_unparsed_messages(self, session) -> int:
         finished = select(MessageClassification.id).where(
@@ -219,6 +253,21 @@ def clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
+def find_live_instrument_keys(
+    trades: list[Trade], papers: dict[int, PaperTrade], now: datetime
+) -> list[str]:
+    """A trade left active from an earlier day has no live market, so it is not worth a request."""
+    keys = {
+        trade.instrument_key
+        for trade in trades
+        if trade.instrument_key
+        and trade.id in papers
+        and is_active_paper_trade(papers[trade.id])
+        and not is_from_earlier_session(trade.created_at, now)
+    }
+    return sorted(keys)
+
+
 def describe_message(
     message: RawMessage,
     classification: MessageClassification | None,
@@ -277,13 +326,16 @@ def describe_trade(trade: Trade) -> dict[str, Any]:
     }
 
 
-def describe_paper_trade(paper: PaperTrade | None, stop_requested: bool) -> dict[str, Any] | None:
+def describe_paper_trade(
+    paper: PaperTrade | None, stop_requested: bool, live_values: dict[str, Any] | None
+) -> dict[str, Any] | None:
     if paper is None:
         return None
     return {
+        **live_values,
         "status": paper.status,
-        "stoppable": paper.status in UNFINISHED_PAPER_STATUSES,
-        "stop_requested": stop_requested and paper.status in UNFINISHED_PAPER_STATUSES,
+        "stoppable": paper.status in ACTIVE_PAPER_STATUSES,
+        "stop_requested": stop_requested and paper.status in ACTIVE_PAPER_STATUSES,
         "qty": paper.qty,
         "entry_price": paper.entry_price,
         "entry_time": paper.entry_time,

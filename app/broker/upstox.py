@@ -48,10 +48,14 @@ class UpstoxBroker:
         return index.find_option(underlying, expiry_date, strike, option_type, today)
 
     async def get_ltp(self, instrument_key: str) -> float:
-        prices = await self._fetch_ltps([instrument_key])
+        prices = await self.get_ltps([instrument_key])
         if instrument_key not in prices:
             raise InstrumentNotFoundError(f"no LTP returned for {instrument_key}")
         return prices[instrument_key]
+
+    async def get_ltps(self, instrument_keys: list[str]) -> dict[str, float]:
+        """Keys the broker has no quote for are absent from the result."""
+        return await self._fetch_ltps(instrument_keys)
 
     async def get_historical_candles(
         self, instrument_key: str, interval: str, start: datetime, end: datetime

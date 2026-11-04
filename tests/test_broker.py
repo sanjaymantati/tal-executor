@@ -149,6 +149,29 @@ async def test_ltp_is_read_and_token_is_sent_as_bearer(tmp_path: Path):
     assert seen == {"auth": "Bearer secret-token", "key": "NSE_FO|1"}
 
 
+async def test_ltps_are_fetched_in_one_request_and_missing_keys_are_absent(tmp_path: Path):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["instrument_key"])
+        body = {
+            "status": "success",
+            "data": {
+                "NSE_FO:A": {"last_price": 10.5, "instrument_token": "NSE_FO|1"},
+                "NSE_FO:B": {"last_price": 20, "instrument_token": "NSE_FO|2"},
+            },
+        }
+        return httpx.Response(200, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        prices = await build_broker(handler, tmp_path, client).get_ltps(
+            ["NSE_FO|1", "NSE_FO|2", "NSE_FO|3"]
+        )
+
+    assert prices == {"NSE_FO|1": 10.5, "NSE_FO|2": 20.0}
+    assert seen == ["NSE_FO|1,NSE_FO|2,NSE_FO|3"]
+
+
 async def test_rejected_token_fails_loudly_without_leaking_it(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"status": "error"})

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 
+import httpx
 from sqlalchemy import select
 
 from app.broker.base import Candle, Instrument, InstrumentNotFoundError
@@ -42,12 +43,25 @@ def make_config(**overrides) -> ExecutionConfig:
     return ExecutionConfig(**{**values, **overrides})
 
 
+def http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://broker.test/ltp")
+    return httpx.HTTPStatusError(
+        "error", request=request, response=httpx.Response(status_code, request=request)
+    )
+
+
 class FakeBroker:
     def __init__(self, candles: list[Candle], ticks: list[float]) -> None:
         self.candles = candles
         self.ticks = ticks
         self.resolve_calls = 0
         self.fail_resolution = False
+        self.fail_ltp = False
+        self.ltp_missing = False
+        self.ltp_calls = 0
+        self.ltps_calls = 0
+        self.stream_calls = 0
+        self.ltp_http_status: int | None = None
         self.instrument = INSTRUMENT
 
     async def resolve_instrument(self, underlying, expiry, strike, option_type) -> Instrument:
@@ -57,12 +71,24 @@ class FakeBroker:
         return self.instrument
 
     async def get_ltp(self, instrument_key: str) -> float:
+        self.ltp_calls += 1
+        if self.ltp_missing:
+            raise InstrumentNotFoundError(f"no LTP returned for {instrument_key}")
         return self.ticks[0]
+
+    async def get_ltps(self, instrument_keys) -> dict[str, float]:
+        self.ltps_calls += 1
+        if self.fail_ltp:
+            raise RuntimeError("broker down")
+        if self.ltp_http_status is not None:
+            raise http_status_error(self.ltp_http_status)
+        return {key: self.ticks[0] for key in instrument_keys} if self.ticks else {}
 
     async def get_historical_candles(self, instrument_key, interval, start, end) -> list[Candle]:
         return [c for c in self.candles if start <= c.time <= end]
 
     async def stream_ltp(self, instrument_keys, callback) -> None:
+        self.stream_calls += 1
         base = BASE_TIME + timedelta(minutes=5)
         for index, price in enumerate(self.ticks):
             await callback(instrument_keys[0], price, base + timedelta(seconds=index))
@@ -418,6 +444,78 @@ async def test_waiting_entry_is_cancelled_at_market_close(session_factory):
     paper = await load_one(session_factory, PaperTrade)
     assert paper.status == PaperTradeStatus.CANCELLED.value
     assert (await load_one(session_factory, Trade)).state == TradeState.CANCELLED.value
+
+
+async def test_unsettleable_trade_after_close_retries_the_price_once_a_minute_and_does_not_stream(
+    session_factory,
+):
+    await create_complete_trade(session_factory)
+    first_broker = FakeBroker(candles=[], ticks=[144])
+    first_watcher = LiveTradeWatcher(build_executor(session_factory, first_broker), first_broker, utc_clock)
+    await first_watcher.start_new_watches()
+    await wait_until(session_factory, lambda p: p.status == PaperTradeStatus.OPEN.value)
+    await first_watcher.stop_all()
+
+    # Restarted after market close, and the contract no longer returns a quote.
+    broker = FakeBroker(candles=[], ticks=[])
+    broker.ltp_missing = True
+    clock = {"now": after_market_close_clock()}
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, lambda: clock["now"])
+    await watcher.start_new_watches()
+    await asyncio.sleep(0.05)
+
+    assert await watcher.close_trades_at_market_close() == 0
+    assert await watcher.close_trades_at_market_close() == 0
+    assert broker.ltp_calls == 1
+    clock["now"] += timedelta(seconds=61)
+    assert await watcher.close_trades_at_market_close() == 0
+    await watcher.stop_all()
+
+    assert broker.ltp_calls == 2
+    assert broker.stream_calls == 0
+
+
+async def test_failed_manual_stop_and_market_close_share_one_retry_gate(session_factory):
+    trade_id = await create_complete_trade(session_factory)
+    first_broker = FakeBroker(candles=[], ticks=[144])
+    first_watcher = LiveTradeWatcher(build_executor(session_factory, first_broker), first_broker, utc_clock)
+    await first_watcher.start_new_watches()
+    await wait_until(session_factory, lambda p: p.status == PaperTradeStatus.OPEN.value)
+    await first_watcher.stop_all()
+    await PaperTradeLedger(session_factory).request_manual_stop(trade_id, utc_clock())
+
+    broker = FakeBroker(candles=[], ticks=[])
+    broker.ltp_missing = True
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, after_market_close_clock)
+    await watcher.start_new_watches()
+    await asyncio.sleep(0.05)
+
+    await watcher.sync_watches()
+    await watcher.sync_watches()
+    await watcher.stop_all()
+
+    assert broker.ltp_calls == 1
+
+
+async def test_open_trade_without_a_price_can_be_closed_at_its_entry_price(session_factory):
+    trade_id = await create_complete_trade(session_factory)
+    broker = FakeBroker(candles=[], ticks=[144])
+    watcher = LiveTradeWatcher(build_executor(session_factory, broker), broker, utc_clock)
+    await watcher.start_new_watches()
+    await wait_until(session_factory, lambda p: p.status == PaperTradeStatus.OPEN.value)
+    await watcher.stop_all()
+    executor = build_executor(session_factory, FakeBroker(candles=[], ticks=[]))
+
+    assert await executor.close_open_trade_at_entry_price(trade_id) is True
+    assert await executor.close_open_trade_at_entry_price(trade_id) is False
+
+    paper = await load_one(session_factory, PaperTrade)
+    assert paper.status == PaperTradeStatus.CLOSED.value
+    assert paper.exit_reason == "MANUAL"
+    assert paper.exit_price == paper.entry_price == 144
+    assert paper.pnl == 0
+    assert (await load_one(session_factory, Trade)).state == TradeState.CLOSED.value
+    assert (await load_event_types(session_factory))[-1] == EventType.MANUAL_EXIT.value
 
 
 async def test_nothing_is_closed_before_market_close(session_factory):

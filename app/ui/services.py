@@ -11,7 +11,9 @@ from app.execution.replay import TradeReplayer
 from app.timeutil import utc_now
 from app.status import PipelineStatusStore
 from app.ui.health import ListenerAwareTelegramHealth, TelegramHealthCheck, UpstoxHealthCheck
+from app.execution.types import TradingCosts
 from app.ui.pnl import PnlQueries
+from app.ui.premiums import LivePriceQuotes
 from app.ui.queries import DashboardQueries
 from app.ui.server import UiServices
 from app.wiring import build_status_store
@@ -27,7 +29,9 @@ def build_ui_services(
 ) -> UiServices:
     status_store = build_status_store(settings)
     return UiServices(
-        queries=DashboardQueries(session_factory),
+        queries=DashboardQueries(
+            session_factory, LivePriceQuotes(broker), build_costs(settings), utc_now
+        ),
         pnl=PnlQueries(session_factory),
         ledger=PaperTradeLedger(session_factory),
         upstox_health=UpstoxHealthCheck(http_client, settings.upstox_access_token, utc_now),
@@ -49,3 +53,7 @@ def build_telegram_health(settings: Settings, status_store: PipelineStatusStore)
         utc_now,
     )
     return ListenerAwareTelegramHealth(status_store, probe, utc_now)
+
+
+def build_costs(settings: Settings) -> TradingCosts:
+    return TradingCosts(settings.slippage, settings.brokerage_per_order)
